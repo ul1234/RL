@@ -15,10 +15,8 @@ import time, pprint
 class QNet(nn.Module):
     def __init__(self, num_observations, num_actions):
         super().__init__()
-        self.fc1 = nn.Linear(num_observations, 50)
-        self.fc1.weight.data.normal_(0, 0.1)   # initialization
-        self.fc2 = nn.Linear(50, num_actions)
-        self.fc2.weight.data.normal_(0, 0.1)   # initialization
+        self.fc1 = nn.Linear(num_observations, 64)
+        self.fc2 = nn.Linear(64, num_actions)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
@@ -54,7 +52,7 @@ class RecordBuffer(object):
 
 
 class DQN(object):
-    def __init__(self, game, gamma = 0.9, greedy = 0.9):
+    def __init__(self, game, gamma = 0.99, greedy_max = 0.9):
         self.env = gym.make(game)
         self.env = self.env.unwrapped
         print('action space:', self.env.action_space)
@@ -65,9 +63,10 @@ class DQN(object):
         self.qnet_train = QNet(num_observations, num_actions)
         self.qnet_target = QNet(num_observations, num_actions)
         self.gamma = gamma
-        self.greedy = greedy
+        self.greedy_max = greedy_max
+        self.greedy = 0
         self.criterion = nn.MSELoss()
-        self.optimizer = optim.Adam(self.qnet_train.parameters(), lr = 0.01)
+        self.optimizer = optim.SGD(self.qnet_train.parameters(), lr = 0.01)
         self.record_buffer = RecordBuffer(buffer_size = 2000)
 
     def train(self, epoches):
@@ -82,13 +81,19 @@ class DQN(object):
             num_steps = 0
             rewards = 0
             while not done:
+                #self.env.render()
                 action = self.choose_action(observation)
                 actions_history.append(action)
                 next_observation, reward, done, info = self.env.step(action)
-                x, x_dot, theta, theta_dot = next_observation
-                r1 = (self.env.x_threshold - abs(x))/self.env.x_threshold - 0.8
-                r2 = (self.env.theta_threshold_radians - abs(theta))/self.env.theta_threshold_radians - 0.5
-                reward = r1 + r2
+                # change reward
+                #x, x_dot, theta, theta_dot = next_observation
+                #r1 = (self.env.x_threshold - abs(x))/self.env.x_threshold - 0.8
+                #r2 = (self.env.theta_threshold_radians - abs(theta))/self.env.theta_threshold_radians - 0.5
+                #reward = r1 + r2
+
+                position, velocity = next_observation
+                # the higher the better
+                reward = abs(position - (-0.5))     # r in [0, 1]
 
                 self.record_buffer.save(observation, action, next_observation, reward)
                 observation = next_observation
@@ -100,7 +105,7 @@ class DQN(object):
                         print('start to train...')
                     if num_updates > 100:
                         self.qnet_target.load_state_dict(self.qnet_train.state_dict())
-                        print('update target QNet')
+                        #print('update target QNet')
                         num_updates = 0
                     num_updates += 1
                     records = self.record_buffer.sample(batch_size = 32)
@@ -117,12 +122,12 @@ class DQN(object):
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
-                    #print('train:', self.qnet_train.fc1.weight, self.qnet_train.fc1.bias)
-                    #print('target:', self.qnet_target.fc1.weight, self.qnet_target.fc1.bias)
+                    self.greedy = self.greedy + 0.001 if self.greedy < self.greedy_max else self.greedy_max
                 num_steps += 1
                 rewards += reward
             #print('epoch {}: steps {}, greedy: {}, rewards: {}, actions: {}'.format(epoch, num_steps, self.greedy, rewards, actions_history))
-            print('epoch {}: steps {}, rewards: {}, loss: {}'.format(epoch, num_steps, rewards, loss_history))
+            #print('epoch {}: steps {}, rewards: {}, loss: {}'.format(epoch, num_steps, rewards, loss_history))
+            print('epoch {}: steps {}, rewards: {}'.format(epoch, num_steps, rewards))
 
     def choose_action(self, observation, optimal = False):
         explore = np.random.rand() > self.greedy and not optimal
@@ -141,7 +146,7 @@ class DQN(object):
             num_steps = 0
             rewards = 0
             while not done:
-                #self.env.render()
+                self.env.render()
                 action = self.choose_action(observation, optimal = True)
                 actions_history.append(action)
                 observation, reward, done, info = self.env.step(action)
@@ -161,10 +166,12 @@ class DQN(object):
                 
 
 if __name__ == '__main__':
-    dqn = DQN('CartPole-v0')
-    dqn.train(epoches = 500)
+    #dqn = DQN('CartPole-v0')
+    dqn = DQN('MountainCar-v0')
+    
+    dqn.train(epoches = 1000)
     dqn.save()
     #dqn.load()
     #dqn.record_buffer.show()
-    dqn.run(epoches = 10)
+    dqn.run(epoches = 1)
     print('done')
