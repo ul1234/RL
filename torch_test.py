@@ -64,7 +64,7 @@ loss.backward()
 print(net.conv1.bias)
 
 for i in range(10):
-    print(net.conv1.bias.grad)
+    #print(net.conv1.bias.grad)
     op.step()
     print(net.conv1.bias)
 
