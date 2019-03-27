@@ -13,20 +13,21 @@ import time, pprint
 
 
 class QNet(nn.Module):
-    def __init__(self, num_observations, num_actions):
+    def __init__(self, observation_space, num_actions = 1):
         super().__init__()
-        self.fc1 = nn.Linear(num_observations, 50)
-        self.fc1.weight.data.normal_(0, 0.1)   # initialization
-        self.fc2 = nn.Linear(50, num_actions)
-        self.fc2.weight.data.normal_(0, 0.1)   # initialization
+        num_observations = np.prod(observation_space.shape)
+        in_neurons = num_actions + num_observations
+        self.fc1 = nn.Linear(in_neurons, 30)
+        self.fc2 = nn.Linear(30, 1)   # output Q value
 
     def forward(self, x):
+        x = torch.from_numpy(x.astype(np.float32))
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return x
 
 class RecordBuffer(object):
-    def __init__(self, buffer_size):
+    def __init__(self, buffer_size = 1000):
         self.record = namedtuple('record', 'observation action next_observation reward')
         self.buffer_size = buffer_size
         self.buffer_write_index = 0
@@ -34,7 +35,7 @@ class RecordBuffer(object):
 
     def save(self, *record_elements):
         # transition: observation, action -> observation(t+1), reward
-        record = self.record(*map(np.float32, record_elements))
+        record = self.record(*record_elements)
         if not self.is_full():
             self.buffer.append(record)
         else:
@@ -54,21 +55,20 @@ class RecordBuffer(object):
 
 
 class DQN(object):
-    def __init__(self, game, gamma = 0.9, greedy = 0.9):
+    def __init__(self, game, gamma = 0.99, greedy_max = 0.9):
         self.env = gym.make(game)
         self.env = self.env.unwrapped
         print('action space:', self.env.action_space)
         print('observation space:', self.env.observation_space)
-        num_actions = self.env.action_space.n
-        num_observations = np.prod(self.env.observation_space.shape)
-        self.actions = list(range(num_actions))
-        self.qnet_train = QNet(num_observations, num_actions)
-        self.qnet_target = QNet(num_observations, num_actions)
+        self.actions = list(range(self.env.action_space.n))
+        self.qnet_train = QNet(self.env.observation_space)
+        self.qnet_target = QNet(self.env.observation_space)
         self.gamma = gamma
-        self.greedy = greedy
+        self.greedy_max = greedy_max
+        self.greedy = 0
         self.criterion = nn.MSELoss()
-        self.optimizer = optim.Adam(self.qnet_train.parameters(), lr = 0.01)
-        self.record_buffer = RecordBuffer(buffer_size = 2000)
+        self.optimizer = optim.SGD(self.qnet_train.parameters(), lr = 0.01)
+        self.record_buffer = RecordBuffer(buffer_size = 1000)
 
     def train(self, epoches):
         print('start to train...')
@@ -76,7 +76,6 @@ class DQN(object):
         num_updates = 0
         for epoch in range(epoches):
             actions_history = []
-            loss_history = []
             observation = self.env.reset()
             done = False
             num_steps = 0
@@ -91,45 +90,47 @@ class DQN(object):
                 reward = r1 + r2
 
                 self.record_buffer.save(observation, action, next_observation, reward)
-                observation = next_observation
-                
+
                 if self.record_buffer.is_full():
                     if not train_start:
                         train_start = True
-                        self.qnet_target.load_state_dict(self.qnet_train.state_dict())
                         print('start to train...')
-                    if num_updates > 100:
-                        self.qnet_target.load_state_dict(self.qnet_train.state_dict())
-                        print('update target QNet')
-                        num_updates = 0
-                    num_updates += 1
-                    records = self.record_buffer.sample(batch_size = 32)
-                    batch_observation, batch_action, batch_next_observation, batch_reward = map(torch.tensor, zip(*records))
+                    records = self.record_buffer.sample(batch_size = 64)
+                    q_eval_x = np.array([np.concatenate((ob, np.array([act]))) for ob, act, next, reward in records])
+                    num_actions = len(self.actions)
+                    q_target_x = np.array([np.concatenate((np.tile(next, (num_actions, 1)), np.array(self.actions).reshape(-1,1)), axis = 1)
+                        for ob, act, next, reward in records])
+                    rewards_target = np.array([reward for ob, act, next, reward in records]).astype(np.float32)
+
                     # Q learning
                     # Q(state, action) = reward + gamma * max(Q(state+1, action_space))
-                    q_eval = self.qnet_train(batch_observation).gather(1, batch_action.reshape(-1, 1).long())
-                    #with torch.no_grad():
-                    q_target_ = self.qnet_target(batch_next_observation).detach()
-                    q_target = (torch.max(q_target_, 1)[0] * self.gamma + batch_reward).view(-1, 1)
+                    q_eval = self.qnet_train(q_eval_x)
+                    with torch.no_grad():
+                        q_target = torch.max(self.qnet_target(q_target_x).view(-1, 2)) * self.gamma + torch.from_numpy(rewards_target)
 
                     loss = self.criterion(q_eval, q_target)
-                    loss_history.append(loss.item())
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
-                    #print('train:', self.qnet_train.fc1.weight, self.qnet_train.fc1.bias)
-                    #print('target:', self.qnet_target.fc1.weight, self.qnet_target.fc1.bias)
+                    num_updates += 1
+                    self.greedy = self.greedy + 0.01 if self.greedy < self.greedy_max else self.greedy_max
                 num_steps += 1
                 rewards += reward
-            #print('epoch {}: steps {}, greedy: {}, rewards: {}, actions: {}'.format(epoch, num_steps, self.greedy, rewards, actions_history))
-            print('epoch {}: steps {}, rewards: {}, loss: {}'.format(epoch, num_steps, rewards, loss_history))
+                observation = next_observation
+            print('epoch {}: steps {}, rewards: {}, actions: {}'.format(epoch, num_steps, rewards, actions_history))
+            if num_updates > 50:
+                self.qnet_target.load_state_dict(self.qnet_train.state_dict())
+                print('update target QNet')
+                num_updates = 0
 
     def choose_action(self, observation, optimal = False):
         explore = np.random.rand() > self.greedy and not optimal
         if explore:
             action = self.env.action_space.sample()
         else:
-            action = self.actions[torch.argmax(self.qnet_train(torch.tensor(observation).float())).item()]
+            num_actions = len(self.actions)
+            q_target_x = np.concatenate((np.tile(observation, (num_actions, 1)), np.array(self.actions).reshape(-1,1)), axis = 1)
+            action = self.actions[torch.argmax(self.qnet_train(q_target_x)).item()]
         return action
 
     def run(self, epoches):
@@ -162,9 +163,9 @@ class DQN(object):
 
 if __name__ == '__main__':
     dqn = DQN('CartPole-v0')
-    dqn.train(epoches = 500)
+    dqn.train(epoches = 1000)
     dqn.save()
     #dqn.load()
-    #dqn.record_buffer.show()
+    dqn.record_buffer.show()
     dqn.run(epoches = 10)
     print('done')
