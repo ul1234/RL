@@ -25,6 +25,10 @@ class QNet(nn.Module):
         x = self.fc2(x)
         return x
 
+    def noisy_weights(self, std = 0.001):
+        for w in [self.fc1.weight, self.fc1.bias, self.fc2.weight, self.fc2.bias]:
+            w.data += torch.randn_like(w.data) * std
+
 class ReplayBuffer(object):
     def __init__(self, buffer_size):
         self.record = namedtuple('record', 'observation action next_observation reward done')
@@ -56,14 +60,16 @@ class Agent(object):
     def __init__(self, observation_space, action_space):
         # hyper parameters
         self.lr = 0.01
-        self.lr_decay = 0.99
+        self.lr_decay = 0.3
         self.gamma = 0.99
         self.epsilon_min = 0.01
         self.epsilon = 1
         self.epsilon_decay = 0.99
         self.batch_size = 32
         self.replay_buffer_size = 1000
-        self.num_learns_to_update_target = 20
+        self.num_learns_to_update_target = 50
+        self.double_dqn = True
+        self.noisy_dqn = True
 
         self.action_space = action_space
         self.actions = list(range(action_space.n))
@@ -72,13 +78,14 @@ class Agent(object):
         self.target_net = QNet(num_observations, action_space.n)
         self.criterion = nn.MSELoss()
         self.optimizer = optim.Adam(self.eval_net.parameters(), lr = self.lr)
-        self.scheduler = lr_scheduler.StepLR(self.optimizer, step_size = 100, gamma = 0.3)
+        self.scheduler = lr_scheduler.StepLR(self.optimizer, step_size = 100, gamma = self.lr_decay)
         self.replay_buffer = ReplayBuffer(buffer_size = self.replay_buffer_size)
 
         self.num_learns = 0
-        self.double_dqn = True
 
     def new_episode(self):
+        if self.noisy_dqn:
+            self.eval_net.noisy_weights()
         self.scheduler.step()
         self.loss_history = []
 
@@ -90,7 +97,7 @@ class Agent(object):
             self.learn()
 
     def choose_action(self, observation, optimal = False):
-        explore = np.random.rand() < self.epsilon and not optimal
+        explore = not optimal and (self.num_learns == 0 or (np.random.rand() < self.epsilon and not self.noisy_dqn))
         if explore:
             action = self.action_space.sample()
         else:
@@ -143,19 +150,17 @@ class Game(object):
         print('action space:', self.env.action_space)
         print('observation space:', self.env.observation_space)
         self.agent = Agent(self.env.observation_space, self.env.action_space)
-        #self.reward_shaping = getattr(self, 'reward_shaping_{}'.format(game_name.split('-')[0]))
+        self.reward_shaping = getattr(self, 'reward_shaping_{}'.format(game_name.split('-')[0]))
         self.resolved = getattr(self, 'resolved_{}'.format(game_name.split('-')[0]))
 
-    def reward_shaping_CartPole(self, next_observation, reward, done):
-        #if not done:
+    def reward_shaping_CartPole(self, next_observation, reward):
         x, x_dot, theta, theta_dot = next_observation
-        r1 = (self.env.x_threshold - abs(x))/self.env.x_threshold - 0.8
-        r2 = (self.env.theta_threshold_radians - abs(theta))/self.env.theta_threshold_radians - 0.5
+        r1 = (self.env.unwrapped.x_threshold - abs(x))/self.env.unwrapped.x_threshold - 0.8
+        r2 = (self.env.unwrapped.theta_threshold_radians - abs(theta))/self.env.unwrapped.theta_threshold_radians - 0.5
         reward = r1 + r2
         return reward
 
-    def reward_shaping_MountainCar(self, next_observation, reward, done):
-        #if not done:
+    def reward_shaping_MountainCar(self, next_observation, reward):
         position, velocity = next_observation
         # the higher the better
         reward = abs(position - (-0.5))     # r in [0, 1]
@@ -182,16 +187,21 @@ class Game(object):
                 action = self.agent.choose_action(observation, optimal = optimal)
                 actions_history.append(action)
                 next_observation, reward, done, _ = self.env.step(action)
-                shaping_reward = reward if not hasattr(self, 'reward_shaping') else self.reward_shaping(next_observation, reward, done)
+                shaping_reward = reward if not hasattr(self, 'reward_shaping') else self.reward_shaping(next_observation, reward)
                 if not optimal: self.agent.memorize(observation, action, next_observation, shaping_reward, done)
                 observation = next_observation
                 num_steps += 1
                 rewards += reward
             #print('episode {}: steps {}, rewards: {}, loss: {}'.format(episode, num_steps, rewards, self.agent.loss_history))
+            #print('episode {}: steps {}, rewards: {}, actions: {}'.format(episode, num_steps, rewards, actions_history))
             print('episode {}: steps {}, rewards: {}'.format(episode, num_steps, rewards))
             scores.append(rewards)
             if self.resolved(scores): break
-            if episode > 300: optimal = True
+            #if episode % 10 == 0:
+            #    plt.plot(self.agent.loss_history)
+            #    plt.show()
+            #if episode > 300: optimal = True
+            #if rewards == 200: render = True
         plt.plot(scores)
         plt.show()
 
