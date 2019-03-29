@@ -167,7 +167,7 @@ class Game(object):
             return True
         return False
 
-    def run(self, episodes, optimal = False):
+    def run(self, episodes, optimal = False, render = False):
         print('start to run (optimal: {})...'.format(optimal))
         scores = []
         for episode in range(episodes):
@@ -178,7 +178,7 @@ class Game(object):
             num_steps = 0
             rewards = 0
             while not done:
-                #self.env.render()
+                if render: self.env.render()
                 action = self.agent.choose_action(observation, optimal = optimal)
                 actions_history.append(action)
                 next_observation, reward, done, _ = self.env.step(action)
@@ -204,6 +204,6 @@ if __name__ == '__main__':
     game.agent.save()
     #game.agent.load()
     #game.replay_buffer.show()
-    #game.run(episodes = 1, optimal = True)
+    #game.run(episodes = 1, optimal = True, render = True)
     game.env.close()
     print('done')
