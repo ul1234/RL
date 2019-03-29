@@ -6,10 +6,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.optim.lr_scheduler as lr_scheduler
 import numpy as np
 from collections import namedtuple
 import random
 import time, pprint
+import matplotlib.pyplot as plt
 
 
 class QNet(nn.Module):
@@ -23,15 +25,15 @@ class QNet(nn.Module):
         x = self.fc2(x)
         return x
 
-class RecordBuffer(object):
+class ReplayBuffer(object):
     def __init__(self, buffer_size):
-        self.record = namedtuple('record', 'observation action next_observation reward')
+        self.record = namedtuple('record', 'observation action next_observation reward done')
         self.buffer_size = buffer_size
         self.buffer_write_index = 0
         self.buffer = []
 
     def save(self, *record_elements):
-        # transition: observation, action -> observation(t+1), reward
+        # transition: observation, action -> observation(t+1), reward, done
         record = self.record(*map(np.float32, record_elements))
         if not self.is_full():
             self.buffer.append(record)
@@ -46,132 +48,162 @@ class RecordBuffer(object):
 
     def is_full(self):
         return len(self.buffer) >= self.buffer_size
-        
+
     def show(self):
         pprint.pprint(self.buffer)
 
+class Agent(object):
+    def __init__(self, observation_space, action_space):
+        # hyper parameters
+        self.lr = 0.01
+        self.lr_decay = 0.99
+        self.gamma = 0.99
+        self.epsilon_min = 0.01
+        self.epsilon = 1
+        self.epsilon_decay = 0.99
+        self.batch_size = 32
+        self.replay_buffer_size = 1000
+        self.num_learns_to_update_target = 20
 
-class DQN(object):
-    def __init__(self, game, gamma = 0.99, greedy_max = 0.9):
-        self.env = gym.make(game)
-        self.env = self.env.unwrapped
+        self.action_space = action_space
+        self.actions = list(range(action_space.n))
+        num_observations = np.prod(observation_space.shape)
+        self.eval_net = QNet(num_observations, action_space.n)
+        self.target_net = QNet(num_observations, action_space.n)
+        self.criterion = nn.MSELoss()
+        self.optimizer = optim.Adam(self.eval_net.parameters(), lr = self.lr)
+        self.scheduler = lr_scheduler.StepLR(self.optimizer, step_size = 100, gamma = 0.3)
+        self.replay_buffer = ReplayBuffer(buffer_size = self.replay_buffer_size)
+
+        self.num_learns = 0
+        self.double_dqn = True
+
+    def new_episode(self):
+        self.scheduler.step()
+        self.loss_history = []
+
+    def memorize(self, *transition):
+        # observation, action, next_observation, reward, done
+        self.replay_buffer.save(*transition)
+        if self.replay_buffer.is_full():
+            if self.num_learns == 0: print('start to learn...')
+            self.learn()
+
+    def choose_action(self, observation, optimal = False):
+        explore = np.random.rand() < self.epsilon and not optimal
+        if explore:
+            action = self.action_space.sample()
+        else:
+            action = self.actions[torch.argmax(self.eval_net(torch.tensor(observation).float())).item()]
+        return action
+
+    def update_target_net(self):
+        if self.num_learns % self.num_learns_to_update_target == 0:
+            self.target_net.load_state_dict(self.eval_net.state_dict())
+            #print('update target net')
+        self.num_learns += 1
+
+    def learn(self):
+        self.update_target_net()
+        records = self.replay_buffer.sample(self.batch_size)
+        not_done_records = [r[:-1] for r in records if r[-1] == 0]
+        done_records = [r[:-1] for r in records if r[-1] != 0]
+        batch_observations, batch_actions, _, _ = map(torch.tensor, zip(*(not_done_records+done_records)))
+        _, _, batch_next_observations, batch_rewards = map(torch.tensor, zip(*not_done_records))
+        if done_records: _, _, _, batch_done_rewards = map(torch.tensor, zip(*done_records))
+        # Q learning
+        # Q(state, action) = reward + gamma * max(Q(state+1, action_space))
+        q_eval = self.eval_net(batch_observations).gather(1, batch_actions.view(-1, 1).long())
+        with torch.no_grad():
+            if self.double_dqn:
+                actions = torch.max(self.eval_net(batch_next_observations), 1)[1]
+                q_target_ = self.target_net(batch_next_observations).gather(1, actions.view(-1, 1).long())
+            else:
+                q_target_ = torch.max(self.target_net(batch_next_observations), 1)[0].view(-1, 1)
+            q_target = q_target_ * self.gamma + batch_rewards.view(-1, 1)
+            if done_records: q_target = torch.cat((q_target, batch_done_rewards.view(-1, 1)), 0)
+        assert q_eval.shape == q_target.shape, 'invalid shape'
+        loss = self.criterion(q_eval, q_target)
+        self.loss_history.append(loss.item())
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_min)
+
+    def save(self, filename = 'qnet_save.txt'):
+        torch.save(self.eval_net.state_dict(), filename)
+
+    def load(self, filename = 'qnet_save.txt'):
+        self.eval_net.load_state_dict(torch.load(filename))
+
+class Game(object):
+    def __init__(self, game_name):
+        self.env = gym.make(game_name)
+        self.env.seed(1)
         print('action space:', self.env.action_space)
         print('observation space:', self.env.observation_space)
-        num_actions = self.env.action_space.n
-        num_observations = np.prod(self.env.observation_space.shape)
-        self.actions = list(range(num_actions))
-        self.qnet_train = QNet(num_observations, num_actions)
-        self.qnet_target = QNet(num_observations, num_actions)
-        self.gamma = gamma
-        self.greedy_max = greedy_max
-        self.greedy = 0
-        self.criterion = nn.MSELoss()
-        self.optimizer = optim.SGD(self.qnet_train.parameters(), lr = 0.01)
-        self.record_buffer = RecordBuffer(buffer_size = 2000)
+        self.agent = Agent(self.env.observation_space, self.env.action_space)
+        #self.reward_shaping = getattr(self, 'reward_shaping_{}'.format(game_name.split('-')[0]))
+        self.resolved = getattr(self, 'resolved_{}'.format(game_name.split('-')[0]))
 
-    def train(self, epoches):
-        print('start to train...')
-        train_start = False
-        num_updates = 0
-        for epoch in range(epoches):
+    def reward_shaping_CartPole(self, next_observation, reward, done):
+        #if not done:
+        x, x_dot, theta, theta_dot = next_observation
+        r1 = (self.env.x_threshold - abs(x))/self.env.x_threshold - 0.8
+        r2 = (self.env.theta_threshold_radians - abs(theta))/self.env.theta_threshold_radians - 0.5
+        reward = r1 + r2
+        return reward
+
+    def reward_shaping_MountainCar(self, next_observation, reward, done):
+        #if not done:
+        position, velocity = next_observation
+        # the higher the better
+        reward = abs(position - (-0.5))     # r in [0, 1]
+        return reward
+
+    def resolved_CartPole(self, scores):
+        if len(scores) >= 100 and np.mean(scores[-100:]) >= 195.0:
+            print('Solved after {} episodes'.format(len(scores)-100))
+            return True
+        return False
+
+    def run(self, episodes, optimal = False):
+        print('start to run (optimal: {})...'.format(optimal))
+        scores = []
+        for episode in range(episodes):
             actions_history = []
-            loss_history = []
             observation = self.env.reset()
+            self.agent.new_episode()
             done = False
             num_steps = 0
             rewards = 0
             while not done:
                 #self.env.render()
-                action = self.choose_action(observation)
+                action = self.agent.choose_action(observation, optimal = optimal)
                 actions_history.append(action)
-                next_observation, reward, done, info = self.env.step(action)
-                # change reward
-                #x, x_dot, theta, theta_dot = next_observation
-                #r1 = (self.env.x_threshold - abs(x))/self.env.x_threshold - 0.8
-                #r2 = (self.env.theta_threshold_radians - abs(theta))/self.env.theta_threshold_radians - 0.5
-                #reward = r1 + r2
-
-                position, velocity = next_observation
-                # the higher the better
-                reward = abs(position - (-0.5))     # r in [0, 1]
-
-                self.record_buffer.save(observation, action, next_observation, reward)
+                next_observation, reward, done, _ = self.env.step(action)
+                shaping_reward = reward if not hasattr(self, 'reward_shaping') else self.reward_shaping(next_observation, reward, done)
+                if not optimal: self.agent.memorize(observation, action, next_observation, shaping_reward, done)
                 observation = next_observation
-                
-                if self.record_buffer.is_full():
-                    if not train_start:
-                        train_start = True
-                        self.qnet_target.load_state_dict(self.qnet_train.state_dict())
-                        print('start to train...')
-                    if num_updates > 100:
-                        self.qnet_target.load_state_dict(self.qnet_train.state_dict())
-                        #print('update target QNet')
-                        num_updates = 0
-                    num_updates += 1
-                    records = self.record_buffer.sample(batch_size = 32)
-                    batch_observation, batch_action, batch_next_observation, batch_reward = map(torch.tensor, zip(*records))
-                    # Q learning
-                    # Q(state, action) = reward + gamma * max(Q(state+1, action_space))
-                    q_eval = self.qnet_train(batch_observation).gather(1, batch_action.reshape(-1, 1).long())
-                    #with torch.no_grad():
-                    q_target_ = self.qnet_target(batch_next_observation).detach()
-                    q_target = (torch.max(q_target_, 1)[0] * self.gamma + batch_reward).view(-1, 1)
-
-                    loss = self.criterion(q_eval, q_target)
-                    loss_history.append(loss.item())
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    self.optimizer.step()
-                    self.greedy = self.greedy + 0.001 if self.greedy < self.greedy_max else self.greedy_max
                 num_steps += 1
                 rewards += reward
-            #print('epoch {}: steps {}, greedy: {}, rewards: {}, actions: {}'.format(epoch, num_steps, self.greedy, rewards, actions_history))
-            #print('epoch {}: steps {}, rewards: {}, loss: {}'.format(epoch, num_steps, rewards, loss_history))
-            print('epoch {}: steps {}, rewards: {}'.format(epoch, num_steps, rewards))
+            #print('episode {}: steps {}, rewards: {}, loss: {}'.format(episode, num_steps, rewards, self.agent.loss_history))
+            print('episode {}: steps {}, rewards: {}'.format(episode, num_steps, rewards))
+            scores.append(rewards)
+            if self.resolved(scores): break
+            if episode > 300: optimal = True
+        plt.plot(scores)
+        plt.show()
 
-    def choose_action(self, observation, optimal = False):
-        explore = np.random.rand() > self.greedy and not optimal
-        if explore:
-            action = self.env.action_space.sample()
-        else:
-            action = self.actions[torch.argmax(self.qnet_train(torch.tensor(observation).float())).item()]
-        return action
-
-    def run(self, epoches):
-        print('start to act by the optimal policy...')
-        for epoch in range(epoches):
-            observation = self.env.reset()
-            actions_history = []
-            done = False
-            num_steps = 0
-            rewards = 0
-            while not done:
-                self.env.render()
-                action = self.choose_action(observation, optimal = True)
-                actions_history.append(action)
-                observation, reward, done, info = self.env.step(action)
-                num_steps += 1
-                rewards += reward
-                time.sleep(0.1)
-            print('epoch {}: steps {}, rewards: {}, actions: {}'.format(epoch, num_steps, rewards, actions_history))
-        self.env.close()
-
-    def save(self, filename = 'qnet_save.txt'):
-        torch.save(self.qnet_train.state_dict(), filename)
-
-    def load(self, filename = 'qnet_save.txt'):
-        self.qnet_train.load_state_dict(torch.load(filename))
-
-
-                
-
+        
 if __name__ == '__main__':
-    #dqn = DQN('CartPole-v0')
-    dqn = DQN('MountainCar-v0')
-    
-    dqn.train(epoches = 1000)
-    dqn.save()
-    #dqn.load()
-    #dqn.record_buffer.show()
-    dqn.run(epoches = 1)
+    game = Game('CartPole-v0')
+    #game = Game('MountainCar-v0')
+
+    game.run(episodes = 1000)
+    game.agent.save()
+    #game.agent.load()
+    #game.replay_buffer.show()
+    #game.run(episodes = 1, optimal = True)
+    game.env.close()
     print('done')
