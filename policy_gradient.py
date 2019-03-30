@@ -13,6 +13,8 @@ import random
 import time, pprint
 import matplotlib.pyplot as plt
 
+####### policy gradient ##############
+
 
 class QNet(nn.Module):
     def __init__(self, num_observations, num_actions):
@@ -102,12 +104,12 @@ class Agent(object):
         self.epsilon = 1
         self.epsilon_decay = 0.99
         self.batch_size = 32
-        self.replay_buffer_size = 1000
+        self.replay_buffer_size = 2000
         self.num_learns_to_update_target = 50
         self.double_dqn = True
         self.noisy_dqn = True
         self.multi_steps_dqn = 3
-        self.normalize_observation = False
+        self.normalize_observation = True
 
         self.action_space = action_space
         self.actions = list(range(action_space.n))
