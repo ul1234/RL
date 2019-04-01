@@ -6,10 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import torch.optim.lr_scheduler as lr_scheduler
 import numpy as np
-from collections import namedtuple
-import random
 import time, pprint
 import matplotlib.pyplot as plt
 
@@ -17,43 +14,35 @@ import matplotlib.pyplot as plt
 class PolicyNet(nn.Module):
     def __init__(self, num_observations, num_actions):
         super().__init__()
+        self.num_observations = num_observations
         self.fc1 = nn.Linear(num_observations, 64)
         self.fc2 = nn.Linear(64, num_actions)
 
     def forward(self, x):
+        batch_size, num_input = x.size()
+        assert num_input == self.num_observations, 'invalid num_input'
         x = F.relu(self.fc1(x))
         x = F.softmax(self.fc2(x))
         return x
 
-
-class Normalizer(object):
-    def __init__(self, replay_buffer):
-        self.replay_buffer = replay_buffer
-
-    def calc_mean_std(self):
-        observation = np.array(self.replay_buffer.buffer)[:, [0, 2]].reshape(-1, 1)
-        self.observation_mean = observation.mean()
-        self.observation_std = observation.std()
-
-    def norm_observation(self, observation):
-        return (observation - self.observation_mean) / self.observation_std
-
-    def norm_records(self, records):
-        mean, std = self.observation_mean, self.observation_std
-        for index, record in enumerate(records):
-            observation, action, next_observation, reward, done = record
-            records[index] = self.replay_buffer.record((observation - mean) / std, action, (next_observation - mean) / std, reward, done)
-
 class TrajectoryBuffer(object):
-    def __init__(self, gamma):
-        self.transition_buffer = TransitionBuffer(gamma)
-        self.buffer = []
+    def __init__(self, buffer_size, gamma):
+        self.buffer_size = buffer_size
+        self.gamma = gamma
+        self.reset()
 
     def store(self, observation, action, reward, done):
         self.transition_buffer.store(observation, action, reward, done)
+        buffer_full = False
         if done:
             self.buffer.append(self.transition_buffer)
-            self.transition_buffer = TransitionBuffer(gamma)
+            self.transition_buffer = TransitionBuffer(self.gamma)
+            if len(self.buffer) == self.buffer_size: buffer_full = True
+        return buffer_full
+
+    def reset(self):
+        self.transition_buffer = TransitionBuffer(self.gamma)
+        self.buffer = []
         
 class TransitionBuffer(object):
     def __init__(self, gamma):
@@ -62,96 +51,79 @@ class TransitionBuffer(object):
 
     def store(self, observation, action, reward, done):
         # transition: observation, action, reward, future_rewards
-        transition = np.array(observation, action, reward, 0).astype(np.float32)[np.newaxis, :]
+        transition = np.concatenate((observation, np.array([action, reward, 0]))).astype(np.float32)[np.newaxis, :]
         if self.buffer is None:
             self.buffer = transition
         else:
             self.buffer = np.concatenate((self.buffer, transition), axis = 0)
-        self.buffer[:, -1] += (self.gamma ** (np.arange(len(self.buffer), 0, -1)-1) * reward)[:, np.newaxis]
-        if done: self.total_rewards = self.buffer.sum(axis = 0)[-2]
+        self.buffer[:, -1] += (self.gamma ** (np.arange(len(self.buffer), 0, -1)-1) * reward)
+        if done:
+            self.total_rewards = self.buffer.sum(axis = 0)[-2]
 
 class Agent(object):
     def __init__(self, observation_space, action_space):
         # hyper parameters
         self.lr = 0.01
         self.gamma = 0.99
-        self.batch_size = 32
+        self.batch_size = 16
+        self.vanilla_policy_gradient = True
+        self.future_rewards_policy_gradient = False
+        self.actor_critic = False
 
         self.action_space = action_space
         self.actions = list(range(action_space.n))
         num_observations = np.prod(observation_space.shape)
         self.policy_net = PolicyNet(num_observations, action_space.n)
-        self.criterion = nn.MSELoss()
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr = self.lr)
-        self.trajectory_buffer = TrajectoryBuffer(self.gamma)
+        self.trajectory_buffer = TrajectoryBuffer(self.batch_size, self.gamma)
 
         self.num_learns = 0
 
     def new_episode(self):
-        if self.noisy_dqn:
-            self.policy_net.noisy_weights()
-        #self.scheduler.step()
         self.loss_history = []
 
     def memorize(self, *transition):
-        # observation, action, next_observation, reward, done
-        self.replay_buffer.save(*transition)
-        if self.replay_buffer.is_full():
-            if self.num_learns == 0:
-                print('start to learn...')
-                if self.normalize_observation: self.normalizer.calc_mean_std()
+        # observation, action, reward, done
+        buffer_full = self.trajectory_buffer.store(*transition)
+        if buffer_full:
             self.learn()
+            self.trajectory_buffer.reset()
 
     def choose_action(self, observation, optimal = False):
         explore = not optimal and (self.num_learns == 0 or (np.random.rand() < self.epsilon and not self.noisy_dqn))
-        actions_prob = self.policy_net(torch.tensor(observation).float())
+        actions_prob = self.policy_net(torch.tensor(observation[np.newaxis, :]).float())
         if optimal:
             action = self.actions[torch.argmax(actions_prob).item()]
         else:
             n = np.random.rand()
             for i, action in enumerate(self.actions):
-                if n < actions_prob[i]: break
-                n -= actions_prob[i]
+                if n < actions_prob[0,i].item(): break
+                n -= actions_prob[0,i].item()
         return action
 
-    def update_target_net(self):
-        if self.num_learns % self.num_learns_to_update_target == 0:
-            self.target_net.load_state_dict(self.policy_net.state_dict())
-            #print('update target net')
-        self.num_learns += 1
-
     def learn(self):
-        self.update_target_net()
-        records = self.replay_buffer.sample(self.batch_size, self.multi_steps_dqn)
-        if self.normalize_observation: self.normalizer.norm_records(records)
-        not_done_records = [r[:-1] for r in records if r[-1] == 0]
-        done_records = [r[:-1] for r in records if r[-1] != 0]
-        batch_observations, batch_actions, _, _ = map(torch.tensor, zip(*(not_done_records+done_records)))
-        _, _, batch_next_observations, batch_rewards = map(torch.tensor, zip(*not_done_records))
-        if done_records: _, _, _, batch_done_rewards = map(torch.tensor, zip(*done_records))
-        # Q learning
-        # Q(state, action) = reward + gamma * max(Q(state+1, action_space))
-        q_eval = self.policy_net(batch_observations).gather(1, batch_actions.view(-1, 1).long())
-        with torch.no_grad():
-            if self.double_dqn:
-                actions = torch.max(self.policy_net(batch_next_observations), 1)[1]
-                q_target_ = self.target_net(batch_next_observations).gather(1, actions.view(-1, 1).long())
-            else:
-                q_target_ = torch.max(self.target_net(batch_next_observations), 1)[0].view(-1, 1)
-            q_target = q_target_ * self.gamma + batch_rewards.view(-1, 1)
-            if done_records: q_target = torch.cat((q_target, batch_done_rewards.view(-1, 1)), 0)
-        assert q_eval.shape == q_target.shape, 'invalid shape'
-        loss = self.criterion(q_eval, q_target)
+        if self.num_learns == 0: print('start to learn...')
+        # loss function
+        # L(theta) = -sum( (sum(future_rewards(t)) - b) * log(P(a(t)|s(t);theta))) )
+        loss = 0
+        for trajectory in self.trajectory_buffer.buffer:
+            if self.vanilla_policy_gradient:
+                rewards = trajectory.total_rewards
+            batch = torch.tensor(trajectory.buffer.T)
+            batch_observations, batch_actions, _, batch_future_rewards = batch[:, 0:-3], batch[:, -3], batch[:, -2], batch[:, -1]
+            prob = self.policy_net(batch_observations).gather(1, batch_actions.view(-1, 1).long())
+            log_prob = torch.log(prob)
+            loss += -torch.sum(rewards * log_prob)
         self.loss_history.append(loss.item())
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-        self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_min)
+        self.num_learns += 1
 
-    def save(self, filename = 'qnet_save.txt'):
+    def save(self, filename = 'policy_net.txt'):
         torch.save(self.policy_net.state_dict(), filename)
 
-    def load(self, filename = 'qnet_save.txt'):
+    def load(self, filename = 'policy_net.txt'):
         self.policy_net.load_state_dict(torch.load(filename))
 
 class Game(object):
@@ -190,8 +162,10 @@ class Game(object):
         rewards = 0
         while not done:
             if render: self.env.render()
-            action = self.agent.choose_action(observation)
+            action = self.agent.choose_action(observation, optimal)
             next_observation, reward, done, _ = self.env.step(action)
+            shaping_reward = reward if not hasattr(self, 'reward_shaping') else self.reward_shaping(next_observation, reward)
+            if not optimal: self.agent.memorize(observation, action, shaping_reward, done)
             observation = next_observation
             num_steps += 1
             rewards += reward
@@ -201,24 +175,8 @@ class Game(object):
         print('start to run (optimal: {})...'.format(optimal))
         scores = []
         for episode in range(episodes):
-            actions_history = []
-            observation = self.env.reset()
             self.agent.new_episode()
-            done = False
-            num_steps = 0
-            rewards = 0
-            while not done:
-                if render: self.env.render()
-                action = self.agent.choose_action(observation, optimal = optimal)
-                actions_history.append(action)
-                next_observation, reward, done, _ = self.env.step(action)
-                shaping_reward = reward if not hasattr(self, 'reward_shaping') else self.reward_shaping(next_observation, reward)
-                if not optimal: self.agent.memorize(observation, action, next_observation, shaping_reward, done)
-                observation = next_observation
-                num_steps += 1
-                rewards += reward
-            #print('episode {}: steps {}, rewards: {}, loss: {}'.format(episode, num_steps, rewards, self.agent.loss_history))
-            #print('episode {}: steps {}, rewards: {}, actions: {}'.format(episode, num_steps, rewards, actions_history))
+            rewards, num_steps = self.run_one_episode(optimal, render)
             print('episode {}: steps {}, rewards: {}'.format(episode, num_steps, rewards))
             scores.append(rewards)
             if self.resolved(scores): break
