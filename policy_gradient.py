@@ -13,10 +13,8 @@ import random
 import time, pprint
 import matplotlib.pyplot as plt
 
-####### policy gradient ##############
 
-
-class QNet(nn.Module):
+class PolicyNet(nn.Module):
     def __init__(self, num_observations, num_actions):
         super().__init__()
         self.fc1 = nn.Linear(num_observations, 64)
@@ -24,12 +22,9 @@ class QNet(nn.Module):
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
-        x = self.fc2(x)
+        x = F.softmax(self.fc2(x))
         return x
 
-    def noisy_weights(self, std = 0.001):
-        for w in [self.fc1.weight, self.fc1.bias, self.fc2.weight, self.fc2.bias]:
-            w.data += torch.randn_like(w.data) * std
 
 class Normalizer(object):
     def __init__(self, replay_buffer):
@@ -49,84 +44,52 @@ class Normalizer(object):
             observation, action, next_observation, reward, done = record
             records[index] = self.replay_buffer.record((observation - mean) / std, action, (next_observation - mean) / std, reward, done)
 
-class ReplayBuffer(object):
-    def __init__(self, buffer_size):
-        self.record = namedtuple('record', 'observation action next_observation reward done')
-        self.buffer_size = buffer_size
-        self.buffer_write_index = 0
+class TrajectoryBuffer(object):
+    def __init__(self, gamma):
+        self.transition_buffer = TransitionBuffer(gamma)
         self.buffer = []
 
-    def save(self, *record_elements):
-        # transition: observation, action -> observation(t+1), reward, done
-        record = self.record(*map(np.float32, record_elements))
-        if not self.is_full():
-            self.buffer.append(record)
+    def store(self, observation, action, reward, done):
+        self.transition_buffer.store(observation, action, reward, done)
+        if done:
+            self.buffer.append(self.transition_buffer)
+            self.transition_buffer = TransitionBuffer(gamma)
+        
+class TransitionBuffer(object):
+    def __init__(self, gamma):
+        self.gamma = gamma
+        self.buffer = None
+
+    def store(self, observation, action, reward, done):
+        # transition: observation, action, reward, future_rewards
+        transition = np.array(observation, action, reward, 0).astype(np.float32)[np.newaxis, :]
+        if self.buffer is None:
+            self.buffer = transition
         else:
-            self.buffer[self.buffer_write_index] = record
-            self.buffer_write_index = (self.buffer_write_index + 1) % self.buffer_size
-
-    def _find_last_record(self, index, steps):
-        rewards = 0
-        while steps > 0:
-            observation, action, next_observation, reward, done = self.buffer[index]
-            rewards += reward
-            steps -= 1
-            index = (index + 1) % len(self.buffer)
-            if (index == self.buffer_write_index or done): break
-        return observation, action, next_observation, rewards, done
-
-
-    def sample(self, batch_size, steps = 0, normalize = False):
-        assert batch_size < len(self.buffer), 'invalid batch_size'
-        if steps > 1:
-            records = []
-            for index in np.random.choice(range(len(self.buffer)), batch_size):
-                observation, action, _, _, _ = self.buffer[index]
-                _, _, next_observation, reward, done = self._find_last_record(index, steps)
-                records.append((observation, action, next_observation, reward, done))
-        else:
-            records = random.sample(self.buffer, batch_size)
-        return records
-    
-    def is_full(self):
-        return len(self.buffer) >= self.buffer_size
-
-    def show(self):
-        pprint.pprint(self.buffer)
+            self.buffer = np.concatenate((self.buffer, transition), axis = 0)
+        self.buffer[:, -1] += (self.gamma ** (np.arange(len(self.buffer), 0, -1)-1) * reward)[:, np.newaxis]
+        if done: self.total_rewards = self.buffer.sum(axis = 0)[-2]
 
 class Agent(object):
     def __init__(self, observation_space, action_space):
         # hyper parameters
         self.lr = 0.01
-        self.lr_decay = 0.3
         self.gamma = 0.99
-        self.epsilon_min = 0.01
-        self.epsilon = 1
-        self.epsilon_decay = 0.99
         self.batch_size = 32
-        self.replay_buffer_size = 2000
-        self.num_learns_to_update_target = 50
-        self.double_dqn = True
-        self.noisy_dqn = True
-        self.multi_steps_dqn = 3
-        self.normalize_observation = True
 
         self.action_space = action_space
         self.actions = list(range(action_space.n))
         num_observations = np.prod(observation_space.shape)
-        self.eval_net = QNet(num_observations, action_space.n)
-        self.target_net = QNet(num_observations, action_space.n)
+        self.policy_net = PolicyNet(num_observations, action_space.n)
         self.criterion = nn.MSELoss()
-        self.optimizer = optim.Adam(self.eval_net.parameters(), lr = self.lr)
-        #self.scheduler = lr_scheduler.StepLR(self.optimizer, step_size = 100, gamma = self.lr_decay)
-        self.replay_buffer = ReplayBuffer(buffer_size = self.replay_buffer_size)
-        self.normalizer = Normalizer(self.replay_buffer)
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr = self.lr)
+        self.trajectory_buffer = TrajectoryBuffer(self.gamma)
 
         self.num_learns = 0
 
     def new_episode(self):
         if self.noisy_dqn:
-            self.eval_net.noisy_weights()
+            self.policy_net.noisy_weights()
         #self.scheduler.step()
         self.loss_history = []
 
@@ -141,16 +104,19 @@ class Agent(object):
 
     def choose_action(self, observation, optimal = False):
         explore = not optimal and (self.num_learns == 0 or (np.random.rand() < self.epsilon and not self.noisy_dqn))
-        if explore:
-            action = self.action_space.sample()
+        actions_prob = self.policy_net(torch.tensor(observation).float())
+        if optimal:
+            action = self.actions[torch.argmax(actions_prob).item()]
         else:
-            if self.normalize_observation: observation = self.normalizer.norm_observation(observation)
-            action = self.actions[torch.argmax(self.eval_net(torch.tensor(observation).float())).item()]
+            n = np.random.rand()
+            for i, action in enumerate(self.actions):
+                if n < actions_prob[i]: break
+                n -= actions_prob[i]
         return action
 
     def update_target_net(self):
         if self.num_learns % self.num_learns_to_update_target == 0:
-            self.target_net.load_state_dict(self.eval_net.state_dict())
+            self.target_net.load_state_dict(self.policy_net.state_dict())
             #print('update target net')
         self.num_learns += 1
 
@@ -165,10 +131,10 @@ class Agent(object):
         if done_records: _, _, _, batch_done_rewards = map(torch.tensor, zip(*done_records))
         # Q learning
         # Q(state, action) = reward + gamma * max(Q(state+1, action_space))
-        q_eval = self.eval_net(batch_observations).gather(1, batch_actions.view(-1, 1).long())
+        q_eval = self.policy_net(batch_observations).gather(1, batch_actions.view(-1, 1).long())
         with torch.no_grad():
             if self.double_dqn:
-                actions = torch.max(self.eval_net(batch_next_observations), 1)[1]
+                actions = torch.max(self.policy_net(batch_next_observations), 1)[1]
                 q_target_ = self.target_net(batch_next_observations).gather(1, actions.view(-1, 1).long())
             else:
                 q_target_ = torch.max(self.target_net(batch_next_observations), 1)[0].view(-1, 1)
@@ -183,10 +149,10 @@ class Agent(object):
         self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_min)
 
     def save(self, filename = 'qnet_save.txt'):
-        torch.save(self.eval_net.state_dict(), filename)
+        torch.save(self.policy_net.state_dict(), filename)
 
     def load(self, filename = 'qnet_save.txt'):
-        self.eval_net.load_state_dict(torch.load(filename))
+        self.policy_net.load_state_dict(torch.load(filename))
 
 class Game(object):
     def __init__(self, game_name):
@@ -217,6 +183,20 @@ class Game(object):
             return True
         return False
 
+    def run_one_episode(self, optimal = False, render = False):
+        observation = self.env.reset()
+        done = False
+        num_steps = 0
+        rewards = 0
+        while not done:
+            if render: self.env.render()
+            action = self.agent.choose_action(observation)
+            next_observation, reward, done, _ = self.env.step(action)
+            observation = next_observation
+            num_steps += 1
+            rewards += reward
+        return rewards, num_steps
+        
     def run(self, episodes, optimal = False, render = False):
         print('start to run (optimal: {})...'.format(optimal))
         scores = []
