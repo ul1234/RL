@@ -25,7 +25,14 @@ class PolicyNet(nn.Module):
         x = F.softmax(self.fc2(x))
         return x
 
-class TrajectoryBuffer(object):
+class Buffer(object):
+    def __getitem__(self, key):
+        return self.buffer.__getitem__(key)
+        
+    def __iter__(self):
+        yield from self.buffer
+        
+class TrajectoryBuffer(Buffer):
     def __init__(self, buffer_size, gamma):
         self.buffer_size = buffer_size
         self.gamma = gamma
@@ -43,8 +50,8 @@ class TrajectoryBuffer(object):
     def reset(self):
         self.transition_buffer = TransitionBuffer(self.gamma)
         self.buffer = []
-        
-class TransitionBuffer(object):
+
+class TransitionBuffer(Buffer):
     def __init__(self, gamma):
         self.gamma = gamma
         self.buffer = None
@@ -57,17 +64,16 @@ class TransitionBuffer(object):
         else:
             self.buffer = np.concatenate((self.buffer, transition), axis = 0)
         self.buffer[:, -1] += (self.gamma ** (np.arange(len(self.buffer), 0, -1)-1) * reward)
-        if done:
-            self.total_rewards = self.buffer.sum(axis = 0)[-2]
+        if done: self.total_rewards = self.buffer.sum(axis = 0)[-2]
 
 class Agent(object):
     def __init__(self, observation_space, action_space):
         # hyper parameters
         self.lr = 0.01
-        self.gamma = 0.99
-        self.batch_size = 16
-        self.vanilla_policy_gradient = True
-        self.future_rewards_policy_gradient = False
+        self.gamma = 0.95
+        self.batch_size = 8
+        self.vanilla_policy_gradient = False
+        self.future_rewards_policy_gradient = True
         self.actor_critic = False
 
         self.action_space = action_space
@@ -90,7 +96,6 @@ class Agent(object):
             self.trajectory_buffer.reset()
 
     def choose_action(self, observation, optimal = False):
-        explore = not optimal and (self.num_learns == 0 or (np.random.rand() < self.epsilon and not self.noisy_dqn))
         actions_prob = self.policy_net(torch.tensor(observation[np.newaxis, :]).float())
         if optimal:
             action = self.actions[torch.argmax(actions_prob).item()]
@@ -106,11 +111,15 @@ class Agent(object):
         # loss function
         # L(theta) = -sum( (sum(future_rewards(t)) - b) * log(P(a(t)|s(t);theta))) )
         loss = 0
-        for trajectory in self.trajectory_buffer.buffer:
+        for trajectory in self.trajectory_buffer:
+            batch_observations, batch_actions, _, batch_future_rewards = map(torch.tensor, [trajectory[:, 0:-3], trajectory[:, -3], trajectory[:, -2], trajectory[:, -1]])
+            
             if self.vanilla_policy_gradient:
                 rewards = trajectory.total_rewards
-            batch = torch.tensor(trajectory.buffer.T)
-            batch_observations, batch_actions, _, batch_future_rewards = batch[:, 0:-3], batch[:, -3], batch[:, -2], batch[:, -1]
+            elif self.future_rewards_policy_gradient:
+                rewards = batch_future_rewards
+            elif self.actor_critic:
+                pass
             prob = self.policy_net(batch_observations).gather(1, batch_actions.view(-1, 1).long())
             log_prob = torch.log(prob)
             loss += -torch.sum(rewards * log_prob)
@@ -170,14 +179,14 @@ class Game(object):
             num_steps += 1
             rewards += reward
         return rewards, num_steps
-        
+
     def run(self, episodes, optimal = False, render = False):
         print('start to run (optimal: {})...'.format(optimal))
         scores = []
         for episode in range(episodes):
             self.agent.new_episode()
             rewards, num_steps = self.run_one_episode(optimal, render)
-            print('episode {}: steps {}, rewards: {}'.format(episode, num_steps, rewards))
+            print('episode {}: steps {}, rewards: {}, num_learns: {}'.format(episode, num_steps, rewards, self.agent.num_learns))
             scores.append(rewards)
             if self.resolved(scores): break
             #if episode % 10 == 0:
@@ -188,7 +197,7 @@ class Game(object):
         plt.plot(scores)
         plt.show()
 
-        
+
 if __name__ == '__main__':
     game = Game('CartPole-v0')
     #game = Game('MountainCar-v0')
