@@ -25,6 +25,20 @@ class PolicyNet(nn.Module):
         x = F.softmax(self.fc2(x))
         return x
 
+class QNet(nn.Module):
+    def __init__(self, num_observations, num_actions):
+        super().__init__()
+        self.num_observations = num_observations
+        self.fc1 = nn.Linear(num_observations, 64)
+        self.fc2 = nn.Linear(64, num_actions)
+
+    def forward(self, x):
+        batch_size, num_input = x.size()
+        assert num_input == self.num_observations, 'invalid num_input'
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+        
 class Buffer(object):
     def __getitem__(self, key):
         return self.buffer.__getitem__(key)
@@ -38,9 +52,10 @@ class TrajectoryBuffer(Buffer):
         self.gamma = gamma
         self.reset()
 
-    def store(self, observation, action, reward, done):
-        self.transition_buffer.store(observation, action, reward, done)
+    def store(self, *transition):
+        self.transition_buffer.store(*transition)
         buffer_full = False
+        done = transition[-1]
         if done:
             self.buffer.append(self.transition_buffer)
             self.transition_buffer = TransitionBuffer(self.gamma)
@@ -56,9 +71,9 @@ class TransitionBuffer(Buffer):
         self.gamma = gamma
         self.buffer = None
 
-    def store(self, observation, action, reward, done):
-        # transition: observation, action, reward, future_rewards
-        transition = np.concatenate((observation, np.array([action, reward, 0]))).astype(np.float32)[np.newaxis, :]
+    def store(self, observation, action, next_observation, reward, done):
+        # transition: observation, next_observation, action, reward, future_rewards
+        transition = np.concatenate((observation, next_observation, np.array([action, reward, 0]))).astype(np.float32)[np.newaxis, :]
         if self.buffer is None:
             self.buffer = transition
         else:
@@ -72,24 +87,28 @@ class Agent(object):
         self.lr = 0.01
         self.gamma = 0.95
         self.batch_size = 8
+        self.reward_bias = 0
         self.vanilla_policy_gradient = False
         self.future_rewards_policy_gradient = True
         self.actor_critic = False
 
+        if self.actor_critic: self.batch_size = 1
         self.action_space = action_space
         self.actions = list(range(action_space.n))
         num_observations = np.prod(observation_space.shape)
         self.policy_net = PolicyNet(num_observations, action_space.n)
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr = self.lr)
+        self.q_net = QNet(num_observations, action_space.n)
+        self.optimizer_policy = optim.Adam(self.policy_net.parameters(), lr = self.lr)
+        self.optimizer_q = optim.Adam(self.q_net.parameters(), lr = self.lr)
         self.trajectory_buffer = TrajectoryBuffer(self.batch_size, self.gamma)
-
+        
         self.num_learns = 0
 
     def new_episode(self):
         self.loss_history = []
 
     def memorize(self, *transition):
-        # observation, action, reward, done
+        # observation, action, next_observation, reward, done
         buffer_full = self.trajectory_buffer.store(*transition)
         if buffer_full:
             self.learn()
@@ -112,21 +131,22 @@ class Agent(object):
         # L(theta) = -sum( (sum(future_rewards(t)) - b) * log(P(a(t)|s(t);theta))) )
         loss = 0
         for trajectory in self.trajectory_buffer:
-            batch_observations, batch_actions, _, batch_future_rewards = map(torch.tensor, [trajectory[:, 0:-3], trajectory[:, -3], trajectory[:, -2], trajectory[:, -1]])
+            # transition: observation, next_observation, action, reward, future_rewards
+            batch_observations, batch_actions, _, batch_future_rewards = map(torch.tensor, [trajectory[:, 0:4], trajectory[:, -3], trajectory[:, -2], trajectory[:, -1]])
             
             if self.vanilla_policy_gradient:
-                rewards = trajectory.total_rewards
+                rewards = trajectory.total_rewards - self.reward_bias
             elif self.future_rewards_policy_gradient:
-                rewards = batch_future_rewards
+                rewards = batch_future_rewards - self.reward_bias
             elif self.actor_critic:
                 pass
             prob = self.policy_net(batch_observations).gather(1, batch_actions.view(-1, 1).long())
             log_prob = torch.log(prob)
             loss += -torch.sum(rewards * log_prob)
         self.loss_history.append(loss.item())
-        self.optimizer.zero_grad()
+        self.optimizer_policy.zero_grad()
         loss.backward()
-        self.optimizer.step()
+        self.optimizer_policy.step()
         self.num_learns += 1
 
     def save(self, filename = 'policy_net.txt'):
@@ -138,7 +158,7 @@ class Agent(object):
 class Game(object):
     def __init__(self, game_name):
         self.env = gym.make(game_name)
-        self.env.seed(1)
+        #self.env.seed(1)
         print('action space:', self.env.action_space)
         print('observation space:', self.env.observation_space)
         self.agent = Agent(self.env.observation_space, self.env.action_space)
@@ -174,7 +194,7 @@ class Game(object):
             action = self.agent.choose_action(observation, optimal)
             next_observation, reward, done, _ = self.env.step(action)
             shaping_reward = reward if not hasattr(self, 'reward_shaping') else self.reward_shaping(next_observation, reward)
-            if not optimal: self.agent.memorize(observation, action, shaping_reward, done)
+            if not optimal: self.agent.memorize(observation, action, next_observation, shaping_reward, done)
             observation = next_observation
             num_steps += 1
             rewards += reward
