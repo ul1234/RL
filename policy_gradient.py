@@ -22,7 +22,7 @@ class PolicyNet(nn.Module):
         batch_size, num_input = x.size()
         assert num_input == self.num_observations, 'invalid num_input'
         x = F.relu(self.fc1(x))
-        x = F.softmax(self.fc2(x))
+        x = F.softmax(self.fc2(x), dim = 1)
         return x
 
 class ValueNet(nn.Module):
@@ -90,17 +90,17 @@ class Agent(object):
         self.batch_size = 8
         self.reward_bias = 0
         # 'vanilla', 'future_rewards', 'actor_critic_mc', 'actor_critic_td'
-        self.policy_gradient_method = 'actor_critic_td'
+        self.policy_gradient_method = 'actor_critic_mc'
 
         self.need_value_net = self.policy_gradient_method in ['actor_critic_mc', 'actor_critic_td']
         self.action_space = action_space
         self.actions = list(range(action_space.n))
-        num_observations = np.prod(observation_space.shape)
-        self.policy_net = PolicyNet(num_observations, action_space.n)
+        self.num_observations = np.prod(observation_space.shape)
+        self.policy_net = PolicyNet(self.num_observations, action_space.n)
         self.optimizer_policy = optim.Adam(self.policy_net.parameters(), lr = self.lr)
 
         if self.need_value_net:
-            self.value_net = ValueNet(num_observations)
+            self.value_net = ValueNet(self.num_observations)
             self.optimizer_value = optim.Adam(self.value_net.parameters(), lr = self.lr)
             self.criterion = nn.MSELoss()
             self.batch_size = 1     # the batch size should be smaller when use actor critic
@@ -137,7 +137,7 @@ class Agent(object):
         for trajectory in self.trajectory_buffer:
             # transition: observation, next_observation, action, reward, future_rewards
             batch_observations, batch_next_observations, batch_actions, batch_rewards, batch_future_rewards = \
-                map(torch.tensor, [trajectory[:, 0:4], trajectory[:, 4:8], trajectory[:, -3], trajectory[:, -2], trajectory[:, -1]])
+                map(torch.tensor, [trajectory[:, 0:self.num_observations], trajectory[:, self.num_observations:2*self.num_observations], trajectory[:, -3], trajectory[:, -2], trajectory[:, -1]])
 
             # 'vanilla', 'future_rewards', 'actor_critic_mc', 'actor_critic_td'
             if self.policy_gradient_method == 'vanilla':
@@ -160,6 +160,7 @@ class Agent(object):
                 # L(theta) = -sum( ( r(t) + V_pi(s(t+1)) - V_pi(s(t)) ) * log(P(a(t)|s(t);theta)) )
                 state_value = self.value_net(batch_observations)
                 next_state_value = self.value_net(batch_next_observations)
+                # if done: next_state_value will be 0????????????
                 rewards = batch_rewards + next_state_value.detach() - state_value.detach()
                 # loss function of value net
                 # L = MSE( r(t) + V_pi(s(t+1)) - V_pi(s(t)) )
@@ -192,7 +193,7 @@ class Game(object):
         print('action space:', self.env.action_space)
         print('observation space:', self.env.observation_space)
         self.agent = Agent(self.env.observation_space, self.env.action_space)
-        #self.reward_shaping = getattr(self, 'reward_shaping_{}'.format(game_name.split('-')[0]))
+        self.reward_shaping = getattr(self, 'reward_shaping_{}'.format(game_name.split('-')[0]))
         self.resolved = getattr(self, 'resolved_{}'.format(game_name.split('-')[0]))
 
     def reward_shaping_CartPole(self, next_observation, reward):
@@ -206,6 +207,7 @@ class Game(object):
         position, velocity = next_observation
         # the higher the better
         reward = abs(position - (-0.5))     # r in [0, 1]
+        #if position > -0.2: reward = 1
         return reward
 
     def resolved_CartPole(self, scores):
@@ -213,11 +215,18 @@ class Game(object):
             print('Solved after {} episodes'.format(len(scores)-100))
             return True
         return False
+        
+    def resolved_MountainCar(self, scores):
+        if len(scores) >= 10 and np.mean(scores[-10:]) >= -100:
+            print('Solved after {} episodes'.format(len(scores)-10))
+            return True
+        return False
 
     def run_one_episode(self, optimal = False, render = False):
         observation = self.env.reset()
         done = False
         num_steps = 0
+        shaping_rewards = 0
         rewards = 0
         while not done:
             if render: self.env.render()
@@ -228,16 +237,19 @@ class Game(object):
             observation = next_observation
             num_steps += 1
             rewards += reward
-        return rewards, num_steps
+            shaping_rewards += shaping_reward
+        return rewards, shaping_rewards, num_steps
 
     def run(self, episodes, optimal = False, render = False):
         print('start to run (optimal: {})...'.format(optimal))
+        shaping_scores = []
         scores = []
         for episode in range(episodes):
             self.agent.new_episode()
-            rewards, num_steps = self.run_one_episode(optimal, render)
-            print('episode {}: steps {}, rewards: {}, num_learns: {}'.format(episode, num_steps, rewards, self.agent.num_learns))
+            rewards, shaping_rewards, num_steps = self.run_one_episode(optimal, render)
+            print('episode {}: steps {}, rewards: {}, shaping_rewards: {}, num_learns: {}'.format(episode, num_steps, rewards, shaping_rewards, self.agent.num_learns))
             scores.append(rewards)
+            shaping_scores.append(shaping_rewards)
             if self.resolved(scores): break
             #if episode % 10 == 0:
             #    plt.plot(self.agent.loss_history)
@@ -245,14 +257,16 @@ class Game(object):
             #if episode > 300: optimal = True
             #if rewards == 200: render = True
         plt.plot(scores)
+        plt.figure()
+        plt.plot(shaping_scores)
         plt.show()
 
 
 if __name__ == '__main__':
-    game = Game('CartPole-v0')
-    #game = Game('MountainCar-v0')
+    #game = Game('CartPole-v0')
+    game = Game('MountainCar-v0')
 
-    game.run(episodes = 1000)
+    game.run(episodes = 10000)
     game.agent.save()
     #game.agent.load()
     #game.replay_buffer.show()
