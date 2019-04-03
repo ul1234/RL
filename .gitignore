@@ -1,5 +1,4 @@
 .idea
 data/faces
 data/
-qnet_save.txt
-policy_net.txt
+*net.txt

@@ -180,10 +180,10 @@ class Agent(object):
         self.optimizer.step()
         self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_min)
 
-    def save(self, filename = 'qnet_save.txt'):
+    def save(self, filename = 'q_net.txt'):
         torch.save(self.eval_net.state_dict(), filename)
 
-    def load(self, filename = 'qnet_save.txt'):
+    def load(self, filename = 'q_net.txt'):
         self.eval_net.load_state_dict(torch.load(filename))
 
 class Game(object):
