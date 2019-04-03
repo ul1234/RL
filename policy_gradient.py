@@ -25,12 +25,12 @@ class PolicyNet(nn.Module):
         x = F.softmax(self.fc2(x))
         return x
 
-class QNet(nn.Module):
-    def __init__(self, num_observations, num_actions):
+class ValueNet(nn.Module):
+    def __init__(self, num_observations):
         super().__init__()
         self.num_observations = num_observations
         self.fc1 = nn.Linear(num_observations, 64)
-        self.fc2 = nn.Linear(64, num_actions)
+        self.fc2 = nn.Linear(64, 1)
 
     def forward(self, x):
         batch_size, num_input = x.size()
@@ -38,14 +38,14 @@ class QNet(nn.Module):
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return x
-        
+
 class Buffer(object):
     def __getitem__(self, key):
         return self.buffer.__getitem__(key)
-        
+
     def __iter__(self):
         yield from self.buffer
-        
+
 class TrajectoryBuffer(Buffer):
     def __init__(self, buffer_size, gamma):
         self.buffer_size = buffer_size
@@ -78,6 +78,7 @@ class TransitionBuffer(Buffer):
             self.buffer = transition
         else:
             self.buffer = np.concatenate((self.buffer, transition), axis = 0)
+        # update the future rewards
         self.buffer[:, -1] += (self.gamma ** (np.arange(len(self.buffer), 0, -1)-1) * reward)
         if done: self.total_rewards = self.buffer.sum(axis = 0)[-2]
 
@@ -85,27 +86,31 @@ class Agent(object):
     def __init__(self, observation_space, action_space):
         # hyper parameters
         self.lr = 0.01
-        self.gamma = 0.95
+        self.gamma = 0.97
         self.batch_size = 8
         self.reward_bias = 0
-        self.vanilla_policy_gradient = False
-        self.future_rewards_policy_gradient = True
-        self.actor_critic = False
+        # 'vanilla', 'future_rewards', 'actor_critic_mc', 'actor_critic_td'
+        self.policy_gradient_method = 'actor_critic_td'
 
-        if self.actor_critic: self.batch_size = 1
+        self.need_value_net = self.policy_gradient_method in ['actor_critic_mc', 'actor_critic_td']
         self.action_space = action_space
         self.actions = list(range(action_space.n))
         num_observations = np.prod(observation_space.shape)
         self.policy_net = PolicyNet(num_observations, action_space.n)
-        self.q_net = QNet(num_observations, action_space.n)
         self.optimizer_policy = optim.Adam(self.policy_net.parameters(), lr = self.lr)
-        self.optimizer_q = optim.Adam(self.q_net.parameters(), lr = self.lr)
+
+        if self.need_value_net:
+            self.value_net = ValueNet(num_observations)
+            self.optimizer_value = optim.Adam(self.value_net.parameters(), lr = self.lr)
+            self.criterion = nn.MSELoss()
+            self.batch_size = 1     # the batch size should be smaller when use actor critic
         self.trajectory_buffer = TrajectoryBuffer(self.batch_size, self.gamma)
-        
+
         self.num_learns = 0
 
     def new_episode(self):
         self.loss_history = []
+        self.loss_history_value = []
 
     def memorize(self, *transition):
         # observation, action, next_observation, reward, done
@@ -127,22 +132,47 @@ class Agent(object):
 
     def learn(self):
         if self.num_learns == 0: print('start to learn...')
-        # loss function
-        # L(theta) = -sum( (sum(future_rewards(t)) - b) * log(P(a(t)|s(t);theta))) )
         loss = 0
+        loss_value = 0
         for trajectory in self.trajectory_buffer:
             # transition: observation, next_observation, action, reward, future_rewards
-            batch_observations, batch_actions, _, batch_future_rewards = map(torch.tensor, [trajectory[:, 0:4], trajectory[:, -3], trajectory[:, -2], trajectory[:, -1]])
-            
-            if self.vanilla_policy_gradient:
+            batch_observations, batch_next_observations, batch_actions, batch_rewards, batch_future_rewards = \
+                map(torch.tensor, [trajectory[:, 0:4], trajectory[:, 4:8], trajectory[:, -3], trajectory[:, -2], trajectory[:, -1]])
+
+            # 'vanilla', 'future_rewards', 'actor_critic_mc', 'actor_critic_td'
+            if self.policy_gradient_method == 'vanilla':
+                # loss function
+                # L(theta) = -sum( reward(trajectory) - b ) * log(P(a(t)|s(t);theta)) )
                 rewards = trajectory.total_rewards - self.reward_bias
-            elif self.future_rewards_policy_gradient:
+            elif self.policy_gradient_method == 'future_rewards':
+                # L(theta) = -sum( ( sum(future_rewards(t)) - b ) * log(P(a(t)|s(t);theta)) )
                 rewards = batch_future_rewards - self.reward_bias
-            elif self.actor_critic:
-                pass
+            elif self.policy_gradient_method == 'actor_critic_mc':
+                # Monte carlo based actor critic
+                # L(theta) = -sum( ( sum(future_rewards(t)) - V_pi(s(t)) ) * log(P(a(t)|s(t);theta)) )
+                state_value = self.value_net(batch_observations)
+                rewards = batch_future_rewards - state_value.detach()
+                # loss function of value net
+                # L = MSE(sum(future_rewards(t)) - V_pi(s(t)))
+                loss_value += self.criterion(batch_future_rewards, state_value)
+            elif self.policy_gradient_method == 'actor_critic_td':
+                # Time Difference based actor critic
+                # L(theta) = -sum( ( r(t) + V_pi(s(t+1)) - V_pi(s(t)) ) * log(P(a(t)|s(t);theta)) )
+                state_value = self.value_net(batch_observations)
+                next_state_value = self.value_net(batch_next_observations)
+                rewards = batch_rewards + next_state_value.detach() - state_value.detach()
+                # loss function of value net
+                # L = MSE( r(t) + V_pi(s(t+1)) - V_pi(s(t)) )
+                loss_value += self.criterion(batch_rewards + next_state_value, state_value)
+
             prob = self.policy_net(batch_observations).gather(1, batch_actions.view(-1, 1).long())
             log_prob = torch.log(prob)
             loss += -torch.sum(rewards * log_prob)
+        if self.need_value_net:
+            self.loss_history_value.append(loss_value.item())
+            self.optimizer_value.zero_grad()
+            loss_value.backward()
+            self.optimizer_value.step()
         self.loss_history.append(loss.item())
         self.optimizer_policy.zero_grad()
         loss.backward()
