@@ -11,6 +11,9 @@ import time, pprint
 import matplotlib.pyplot as plt
 
 
+# add observation with timestep t
+# policy gradient must have positive rewards
+
 class PolicyNet(nn.Module):
     def __init__(self, num_observations, num_actions):
         super().__init__()
@@ -87,15 +90,18 @@ class Agent(object):
         # hyper parameters
         self.lr = 0.01
         self.gamma = 0.97
-        self.batch_size = 8
+        self.batch_size = 1 #8
         self.reward_bias = 0
         # 'vanilla', 'future_rewards', 'actor_critic_mc', 'actor_critic_td'
         self.policy_gradient_method = 'actor_critic_mc'
+        self.add_timestep_to_observation = True
 
         self.need_value_net = self.policy_gradient_method in ['actor_critic_mc', 'actor_critic_td']
         self.action_space = action_space
         self.actions = list(range(action_space.n))
         self.num_observations = np.prod(observation_space.shape)
+		
+        if self.add_timestep_to_observation: self.num_observations += 1
         self.policy_net = PolicyNet(self.num_observations, action_space.n)
         self.optimizer_policy = optim.Adam(self.policy_net.parameters(), lr = self.lr)
 
@@ -107,6 +113,7 @@ class Agent(object):
         self.trajectory_buffer = TrajectoryBuffer(self.batch_size, self.gamma)
 
         self.num_learns = 0
+        self.debug_rewards = []
 
     def new_episode(self):
         self.loss_history = []
@@ -138,6 +145,7 @@ class Agent(object):
             # transition: observation, next_observation, action, reward, future_rewards
             batch_observations, batch_next_observations, batch_actions, batch_rewards, batch_future_rewards = \
                 map(torch.tensor, [trajectory[:, 0:self.num_observations], trajectory[:, self.num_observations:2*self.num_observations], trajectory[:, -3], trajectory[:, -2], trajectory[:, -1]])
+            batch_actions, batch_rewards, batch_future_rewards = map(lambda x: x.view(-1, 1), [batch_actions, batch_rewards, batch_future_rewards])
 
             # 'vanilla', 'future_rewards', 'actor_critic_mc', 'actor_critic_td'
             if self.policy_gradient_method == 'vanilla':
@@ -165,8 +173,9 @@ class Agent(object):
                 # loss function of value net
                 # L = MSE( r(t) + V_pi(s(t+1)) - V_pi(s(t)) )
                 loss_value += self.criterion(batch_rewards + next_state_value, state_value)
+            self.debug_rewards.append(rewards)
 
-            prob = self.policy_net(batch_observations).gather(1, batch_actions.view(-1, 1).long())
+            prob = self.policy_net(batch_observations).gather(1, batch_actions.long())
             log_prob = torch.log(prob)
             loss += -torch.sum(rewards * log_prob)
         if self.need_value_net:
@@ -196,18 +205,25 @@ class Game(object):
         self.reward_shaping = getattr(self, 'reward_shaping_{}'.format(game_name.split('-')[0]))
         self.resolved = getattr(self, 'resolved_{}'.format(game_name.split('-')[0]))
 
-    def reward_shaping_CartPole(self, next_observation, reward):
+    def reward_shaping_CartPole(self, observation, next_observation, reward):
         x, x_dot, theta, theta_dot = next_observation
         r1 = (self.env.unwrapped.x_threshold - abs(x))/self.env.unwrapped.x_threshold - 0.8
         r2 = (self.env.unwrapped.theta_threshold_radians - abs(theta))/self.env.unwrapped.theta_threshold_radians - 0.5
         reward = r1 + r2
         return reward
 
-    def reward_shaping_MountainCar(self, next_observation, reward):
-        position, velocity = next_observation
+    def reward_shaping_MountainCar(self, observation, next_observation, reward):
+        position = observation[0]
+        next_position, next_velocity = next_observation
         # the higher the better
-        reward = abs(position - (-0.5))     # r in [0, 1]
+        #reward = abs(position - (-0.5))     # r in [0, 1]
         #if position > -0.2: reward = 1
+        if next_position > position: reward += 1
+        if not hasattr(self, 'max_position'): self.max_position = next_position
+        if next_position > self.max_position:
+            reward += 2
+            self.max_position = next_position
+            print('Max position reached: {}'.format(next_position))
         return reward
 
     def resolved_CartPole(self, scores):
@@ -222,17 +238,25 @@ class Game(object):
             return True
         return False
 
+    def resolved_MountainCar(self, scores):
+        if len(scores) >= 10 and np.mean(scores[-10:]) >= -100.0:
+            print('Solved after {} episodes'.format(len(scores)-10))
+            return True
+        return False
+
     def run_one_episode(self, optimal = False, render = False):
         observation = self.env.reset()
         done = False
         num_steps = 0
         shaping_rewards = 0
         rewards = 0
+        if self.agent.add_timestep_to_observation: observation = np.append(observation, num_steps)
         while not done:
             if render: self.env.render()
             action = self.agent.choose_action(observation, optimal)
             next_observation, reward, done, _ = self.env.step(action)
-            shaping_reward = reward if not hasattr(self, 'reward_shaping') else self.reward_shaping(next_observation, reward)
+            shaping_reward = reward if not hasattr(self, 'reward_shaping') else self.reward_shaping(observation, next_observation, reward)
+            if self.agent.add_timestep_to_observation: next_observation = np.append(next_observation, num_steps+1)
             if not optimal: self.agent.memorize(observation, action, next_observation, shaping_reward, done)
             observation = next_observation
             num_steps += 1
@@ -244,6 +268,7 @@ class Game(object):
         print('start to run (optimal: {})...'.format(optimal))
         shaping_scores = []
         scores = []
+        shaping_scores = []
         for episode in range(episodes):
             self.agent.new_episode()
             rewards, shaping_rewards, num_steps = self.run_one_episode(optimal, render)
@@ -257,9 +282,9 @@ class Game(object):
             #if episode > 300: optimal = True
             #if rewards == 200: render = True
         plt.plot(scores)
-        plt.figure()
-        plt.plot(shaping_scores)
+        plt.plot(shaping_scores, 'r--')
         plt.show()
+        pprint.pprint(self.agent.debug_rewards)
 
 
 if __name__ == '__main__':
