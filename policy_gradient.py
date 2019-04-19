@@ -100,6 +100,7 @@ class Agent(object):
         self.action_space = action_space
         self.actions = list(range(action_space.n))
         self.num_observations = np.prod(observation_space.shape)
+		
         if self.add_timestep_to_observation: self.num_observations += 1
         self.policy_net = PolicyNet(self.num_observations, action_space.n)
         self.optimizer_policy = optim.Adam(self.policy_net.parameters(), lr = self.lr)
@@ -144,7 +145,6 @@ class Agent(object):
             # transition: observation, next_observation, action, reward, future_rewards
             batch_observations, batch_next_observations, batch_actions, batch_rewards, batch_future_rewards = \
                 map(torch.tensor, [trajectory[:, 0:self.num_observations], trajectory[:, self.num_observations:2*self.num_observations], trajectory[:, -3], trajectory[:, -2], trajectory[:, -1]])
-
             batch_actions, batch_rewards, batch_future_rewards = map(lambda x: x.view(-1, 1), [batch_actions, batch_rewards, batch_future_rewards])
 
             # 'vanilla', 'future_rewards', 'actor_critic_mc', 'actor_critic_td'
@@ -168,6 +168,7 @@ class Agent(object):
                 # L(theta) = -sum( ( r(t) + V_pi(s(t+1)) - V_pi(s(t)) ) * log(P(a(t)|s(t);theta)) )
                 state_value = self.value_net(batch_observations)
                 next_state_value = self.value_net(batch_next_observations)
+                # if done: next_state_value will be 0????????????
                 rewards = batch_rewards + next_state_value.detach() - state_value.detach()
                 # loss function of value net
                 # L = MSE( r(t) + V_pi(s(t+1)) - V_pi(s(t)) )
@@ -230,6 +231,12 @@ class Game(object):
             print('Solved after {} episodes'.format(len(scores)-100))
             return True
         return False
+        
+    def resolved_MountainCar(self, scores):
+        if len(scores) >= 10 and np.mean(scores[-10:]) >= -100:
+            print('Solved after {} episodes'.format(len(scores)-10))
+            return True
+        return False
 
     def resolved_MountainCar(self, scores):
         if len(scores) >= 10 and np.mean(scores[-10:]) >= -100.0:
@@ -259,6 +266,7 @@ class Game(object):
 
     def run(self, episodes, optimal = False, render = False):
         print('start to run (optimal: {})...'.format(optimal))
+        shaping_scores = []
         scores = []
         shaping_scores = []
         for episode in range(episodes):
@@ -283,7 +291,7 @@ if __name__ == '__main__':
     #game = Game('CartPole-v0')
     game = Game('MountainCar-v0')
 
-    game.run(episodes = 1000)
+    game.run(episodes = 10000)
     game.agent.save()
     #game.agent.load()
     #game.replay_buffer.show()
