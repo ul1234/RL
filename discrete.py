@@ -76,7 +76,8 @@ class TransitionBuffer(Buffer):
 
 
 class Policy(object):
-    pass
+    def set(self, epsilon):
+        pass
 
 class EpsilonGreedy(Policy):
     def __init__(self, q_table, epsilon = 0.1):
@@ -102,6 +103,26 @@ class EpsilonGreedy(Policy):
         prob[max_index] += (1 - self.epsilon) / max_index.size
         return prob
 
+class Softmax(Policy):
+    def __init__(self, q_table):
+        self.q_table = q_table
+
+    def softmax(self, q):
+        q_exp = np.exp(q)
+        return q_exp / q_exp.sum()
+
+    def act(self, observation):
+        q_actions = self.q_table[observation, :]
+        q_prob = self.softmax(q_actions)
+        n = np.random.rand()
+        for action, prob in enumerate(q_prob):
+            if n < prob: break
+            n -= prob
+        return action
+
+    def action_prob(self, observation):
+        q_actions = self.q_table[observation, :]
+        return self.softmax(q_actions)
 
 class Learning(object):
     def __init__(self, alpha, gamma, q_table):
@@ -199,8 +220,9 @@ class QLearningLambda(SarsaLambda):
 class Agent(object):
     _ID = count(0)
     LEARN_METHODS = ['MC', 'Sarsa', 'ExpectedSarsa', 'SarsaLambda', 'ExpectedSarsaLambda', 'QLearning', 'QLearningLambda']
+    POLICIES = ['EpsilonGreedy', 'Softmax']
 
-    def __init__(self, n_observation, n_action, learn_method = 'QLearning'):
+    def __init__(self, n_observation, n_action, policy = 'EpsilonGreedy', learn_method = 'QLearning'):
         # hyper parameters
         self.epsilon = 0.5
         self.alpha = 0.3
@@ -211,7 +233,10 @@ class Agent(object):
         self.n_observation = n_observation
         self.n_action = n_action
         self.q_table = QTable(n_observation, n_action)
-        self.policy = EpsilonGreedy(self.q_table, self.epsilon)
+
+        policies = {'EpsilonGreedy': EpsilonGreedy(self.q_table, self.epsilon),
+                    'Softmax': Softmax(self.q_table)}
+        self.policy = policies[policy]
 
         learn_methods = {'MC': MonteCarlo(self.alpha, self.gamma, self.q_table),
                          'Sarsa': Sarsa(self.alpha, self.gamma, self.q_table),
@@ -277,7 +302,7 @@ class Game(object):
             rewards_history.append(rewards)
             shaping_rewards_history.append(shaping_rewards)
             num_steps_history.append(num_steps)
-            if episode % 1000 == 0:
+            if episode % 500 == 0:
                 print('[{}] episode {}: steps {}, rewards: {}, shaping_rewards: {}, num_learns: {}'.format(agent.name, episode, num_steps, rewards, shaping_rewards, agent.learn.num_learns))
             if self.resolved(rewards, episodes): break
         print('\n')
@@ -301,15 +326,18 @@ class Taxi(Game):
         super(Taxi, self).__init__('Taxi-v2')
         self.num_avg_history = 100
         self.agents = {}
-        for learn_method in Agent.LEARN_METHODS:
-            self.agents[learn_method] = Agent(self.env.observation_space.n, self.env.action_space.n, learn_method)
+        for policy in Agent.POLICIES:
+            for learn_method in Agent.LEARN_METHODS:
+                key = '{}/{}'.format(learn_method, policy)
+                self.agents[key] = Agent(self.env.observation_space.n, self.env.action_space.n, policy, learn_method)
 
     def run(self, episodes):
         rewards_history, num_steps_history = {}, {}
         for key, agent in self.agents.items():
             rewards_history[key], _, num_steps_history[key] = self.run_episodes(agent, episodes)
         plt.figure()
-        colors = ['b--', 'r--', 'g--', 'k--', 'm--', 'y--', 'c--']
+        colors = ['b--', 'r--', 'g--', 'k--', 'm--', 'y--', 'c--',
+                  'b', 'r', 'g', 'k', 'm', 'y', 'c']
         for index, (key, rewards) in enumerate(rewards_history.items()):
             plt.plot(rewards, colors[index], label = key)
             print(self.agents[key])
@@ -320,7 +348,8 @@ class Taxi(Game):
 
 if __name__ == '__main__':
     game = Taxi()
-    game.run(episodes = 200000)
+    #game.run(episodes = 200000)
+    game.run(episodes = 10000)
 
     ## The output is:
     

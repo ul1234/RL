@@ -169,7 +169,7 @@ class Agent(object):
                 state_value = self.value_net(batch_observations)
                 next_state_value = self.value_net(batch_next_observations)
                 # if done: next_state_value will be 0????????????
-                rewards = batch_rewards + next_state_value.detach() - state_value.detach()
+                rewards = batch_rewards + self.gamma * next_state_value.detach() - state_value.detach()
                 # loss function of value net
                 # L = MSE( r(t) + V_pi(s(t+1)) - V_pi(s(t)) )
                 loss_value += self.criterion(batch_rewards + next_state_value, state_value)
