@@ -187,10 +187,18 @@ class QLearning(TD):
         delta = reward + self.gamma * np.max(self.q_table[next_observation, :]) - self.q_table[observation, action]
         return delta
 
+class QLearningLambda(SarsaLambda):
+    def __init__(self, alpha, gamma, q_table, lmda):
+        super(QLearningLambda, self).__init__(alpha, gamma, q_table, lmda)
+        self.q_learning = QLearning(alpha, gamma, q_table)
+
+    def delta(self, *transition):
+        return self.q_learning.delta(*transition)
+
 
 class Agent(object):
     _ID = count(0)
-    LEARN_METHODS = ['MC', 'Sarsa', 'ExpectedSarsa', 'SarsaLambda', 'ExpectedSarsaLambda', 'QLearning']
+    LEARN_METHODS = ['MC', 'Sarsa', 'ExpectedSarsa', 'SarsaLambda', 'ExpectedSarsaLambda', 'QLearning', 'QLearningLambda']
 
     def __init__(self, n_observation, n_action, learn_method = 'QLearning'):
         # hyper parameters
@@ -210,7 +218,8 @@ class Agent(object):
                          'ExpectedSarsa': ExpectedSarsa(self.alpha, self.gamma, self.q_table, self.policy),
                          'SarsaLambda': SarsaLambda(self.alpha, self.gamma, self.q_table, self.lmda),
                          'ExpectedSarsaLambda': ExpectedSarsaLambda(self.alpha, self.gamma, self.q_table, self.lmda, self.policy),
-                         'QLearning': QLearning(self.alpha, self.gamma, self.q_table)}
+                         'QLearning': QLearning(self.alpha, self.gamma, self.q_table),
+                         'QLearningLambda': QLearningLambda(self.alpha, self.gamma, self.q_table, self.lmda)}
         self.learn = learn_methods[learn_method]
         self.id = next(self._ID)
         self.name = 'Agent {}: {}/{}'.format(self.id, self.learn.__class__.__name__, self.policy.__class__.__name__)
@@ -300,7 +309,7 @@ class Taxi(Game):
         for key, agent in self.agents.items():
             rewards_history[key], _, num_steps_history[key] = self.run_episodes(agent, episodes)
         plt.figure()
-        colors = ['b--', 'r--', 'g--', 'k--', 'm--', 'y--']
+        colors = ['b--', 'r--', 'g--', 'k--', 'm--', 'y--', 'c--']
         for index, (key, rewards) in enumerate(rewards_history.items()):
             plt.plot(rewards, colors[index], label = key)
             print(self.agents[key])
@@ -313,11 +322,21 @@ if __name__ == '__main__':
     game = Taxi()
     game.run(episodes = 200000)
 
-    ## The output is
-    ##[Agent 0: MonteCarlo/EpsilonGreedy] Best Avg Rewards: 9.03 in 186346/200000 episodes
-    ##[Agent 1: Sarsa/EpsilonGreedy] Best Avg Rewards: 9.34 in 161450/200000 episodes
-    ##[Agent 2: ExpectedSarsa/EpsilonGreedy] Best Avg Rewards: 9.46 in 82290/200000 episodes
-    ##[Agent 3: SarsaLambda/EpsilonGreedy] Best Avg Rewards: 9.3 in 168627/200000 episodes
-    ##[Agent 4: ExpectedSarsaLambda/EpsilonGreedy] Best Avg Rewards: 9.36 in 133672/200000 episodes
-    ##[Agent 5: QLearning/EpsilonGreedy] Best Avg Rewards: 9.37 in 147082/200000 episodes
+    ## The output is:
+    
+    ##[Agent 0: MonteCarlo/EpsilonGreedy] Epsilon: 1.7526333124414336e-05, Alpha: 1.0515799874648609e-05, Gamma: 0.9, Lambda: 0.5
+    ##Best Avg Rewards: 9.04 in 153024/200000 episodes
+    ##[Agent 1: Sarsa/EpsilonGreedy] Epsilon: 4.888987831561423e-05, Alpha: 2.933392698936855e-05, Gamma: 0.9, Lambda: 0.5
+    ##Best Avg Rewards: 9.27 in 149215/200000 episodes
+    ##[Agent 2: ExpectedSarsa/EpsilonGreedy] Epsilon: 3.783005587731689e-05, Alpha: 2.2698033526390145e-05, Gamma: 0.9, Lambda: 0.5
+    ##Best Avg Rewards: 9.33 in 194497/200000 episodes
+    ##[Agent 3: SarsaLambda/EpsilonGreedy] Epsilon: 1.049366305098405e-05, Alpha: 6.296197830590433e-06, Gamma: 0.9, Lambda: 0.5
+    ##Best Avg Rewards: 9.3 in 158916/200000 episodes
+    ##[Agent 4: ExpectedSarsaLambda/EpsilonGreedy] Epsilon: 2.151773927384147e-05, Alpha: 1.2910643564304892e-05, Gamma: 0.9, Lambda: 0.5
+    ##Best Avg Rewards: 9.38 in 120169/200000 episodes
+    ##[Agent 5: QLearning/EpsilonGreedy] Epsilon: 5.3868388518253144e-06, Alpha: 3.232103311095192e-06, Gamma: 0.9, Lambda: 0.5
+    ##Best Avg Rewards: 9.42 in 117248/200000 episodes
+    ##[Agent 6: QLearningLambda/EpsilonGreedy] Epsilon: 2.641813893244094e-05, Alpha: 1.5850883359464575e-05, Gamma: 0.9, Lambda: 0.5
+    ##Best Avg Rewards: 9.43 in 185391/200000 episodes
+
 
