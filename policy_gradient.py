@@ -164,7 +164,7 @@ class Agent(object):
                 # L = MSE(sum(future_rewards(t)) - V_pi(s(t)))
                 loss_value += self.criterion(batch_future_rewards, state_value)
             elif self.policy_gradient_method == 'actor_critic_td':
-                # Time Difference based actor critic
+                # Temporal Difference based actor critic
                 # L(theta) = -sum( ( r(t) + V_pi(s(t+1)) - V_pi(s(t)) ) * log(P(a(t)|s(t);theta)) )
                 state_value = self.value_net(batch_observations)
                 next_state_value = self.value_net(batch_next_observations)
