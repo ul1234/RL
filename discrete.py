@@ -76,16 +76,22 @@ class TransitionBuffer(Buffer):
 
 
 class Policy(object):
-    def set(self, epsilon):
-        pass
+    def __init__(self, q_table):
+        self.q_table = q_table
+        self.steps = 0
+
+    def step(self):
+        self.steps += 1
 
 class EpsilonGreedy(Policy):
     def __init__(self, q_table, epsilon = 0.1):
-        self.q_table = q_table
-        self.set(epsilon)
-
-    def set(self, epsilon):
+        super(EpsilonGreedy, self).__init__(q_table)
         self.epsilon = epsilon
+
+    def step(self, num_learns):
+        super(EpsilonGreedy, self).step()
+        if num_learns % 1000 == 0:
+           self.epsilon *= 0.99
 
     def act(self, observation):
         explore = np.random.rand() < self.epsilon
@@ -103,12 +109,21 @@ class EpsilonGreedy(Policy):
         prob[max_index] += (1 - self.epsilon) / max_index.size
         return prob
 
+    def __repr__(self):
+        return '[{}] Epsilon: {}'.format(self.__class__.__name__, self.epsilon)
+
 class Softmax(Policy):
-    def __init__(self, q_table):
-        self.q_table = q_table
+    def __init__(self, q_table, temperature = 1):
+        super(Softmax, self).__init__(q_table)
+        self.temperature = temperature
+
+    def step(self, num_learns):
+        super(Softmax, self).step()
+        if num_learns % 3000 == 0:
+           self.temperature = max(0.01, self.temperature * 0.99)
 
     def softmax(self, q):
-        q_exp = np.exp(q)
+        q_exp = np.exp(q / self.temperature)
         return q_exp / q_exp.sum()
 
     def act(self, observation):
@@ -124,19 +139,21 @@ class Softmax(Policy):
         q_actions = self.q_table[observation, :]
         return self.softmax(q_actions)
 
+    def __repr__(self):
+        return '[{}] Temperature: {}'.format(self.__class__.__name__, self.temperature)
+
 class Learning(object):
     def __init__(self, alpha, gamma, q_table):
-        self.set(alpha, gamma)
-        self.q_table = q_table
-        self.num_learns = 0
-
-    def set(self, alpha, gamma):
         self.alpha = alpha
         self.gamma = gamma
+        self.q_table = q_table
+        self.num_learns = 0
 
     def step(self):
         if self.num_learns == 0: print('start to learn...')
         self.num_learns += 1
+        if self.num_learns % 3000 == 0:
+            self.alpha = max(self.alpha * 0.99, 1/np.sqrt(self.num_learns)*0.1)
 
 class MonteCarlo(Learning):
     def __init__(self, alpha, gamma, q_table):
@@ -224,8 +241,9 @@ class Agent(object):
 
     def __init__(self, n_observation, n_action, policy = 'EpsilonGreedy', learn_method = 'QLearning'):
         # hyper parameters
-        self.epsilon = 0.5
-        self.alpha = 0.3
+        self.epsilon = 0.5      # EpsilonGreedy
+        self.temperature = 1    # Softmax policy
+        self.alpha = 0.3        # learning rate
         self.gamma = 0.9
         self.lmda = 0.5
 
@@ -235,7 +253,7 @@ class Agent(object):
         self.q_table = QTable(n_observation, n_action)
 
         policies = {'EpsilonGreedy': EpsilonGreedy(self.q_table, self.epsilon),
-                    'Softmax': Softmax(self.q_table)}
+                    'Softmax': Softmax(self.q_table, self.temperature)}
         self.policy = policies[policy]
 
         learn_methods = {'MC': MonteCarlo(self.alpha, self.gamma, self.q_table),
@@ -250,21 +268,18 @@ class Agent(object):
         self.name = 'Agent {}: {}/{}'.format(self.id, self.learn.__class__.__name__, self.policy.__class__.__name__)
 
     def new_episode(self):
-        if self.learn.num_learns % 1000 == 1:
-           self.epsilon *= 0.95
-           self.alpha *= 0.95
-           self.policy.set(self.epsilon)
-           self.learn.set(self.alpha, self.gamma)
+        pass
 
     def step(self, *transition):
         self.learn.step(*transition)
+        self.policy.step(self.learn.num_learns)
 
     def act(self, observation, optimal = False):
         action = self.policy.act(observation)
         return action
 
     def __repr__(self):
-        return '[{}] Epsilon: {}, Alpha: {}, Gamma: {}, Lambda: {}'.format(self.name, self.epsilon, self.alpha, self.gamma ,self.lmda)
+        return '[{}] {}, Alpha: {}'.format(self.name, repr(self.policy), self.learn.alpha)
 
 
 class Game(object):
@@ -328,6 +343,7 @@ class Taxi(Game):
         self.agents = {}
         for policy in Agent.POLICIES:
             for learn_method in Agent.LEARN_METHODS:
+                if learn_method == 'MC': continue
                 key = '{}/{}'.format(learn_method, policy)
                 self.agents[key] = Agent(self.env.observation_space.n, self.env.action_space.n, policy, learn_method)
 
