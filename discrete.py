@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 from collections import deque
 from itertools import count
 
-
 class Buffer(object):
     def __getitem__(self, key):
         if isinstance(key, tuple):
@@ -34,6 +33,37 @@ class QTable(Buffer):
         self.n_observation = n_observation
         self.n_action = n_action
         self.buffer = np.zeros((n_observation, n_action))
+
+    def update(self, observation, action, alpha, delta):
+        self.buffer[observation, action] += alpha * delta
+
+class QLinear(object):
+    def __init__(self, n_observation, n_action, alpha, feature):
+        self.n_observation = n_observation
+        self.n_action = n_action
+        self.alpha = alpha
+        self.feature = feature
+        self.n_feature = len(feature(0)) + 1   # include bias
+        self.weights = np.random.randn(self.n_feature, n_action) / np.sqrt(self.n_feature)
+        self.num_updates = 0
+
+    def __getitem__(self, key):
+        if isinstance(key, tuple):
+            observation, action = key
+        else:
+            observation, action = key, ':'    
+        features = np.array(self.feature(observation) + (1,))
+        q_value = np.dot(features, self.weights)
+        return q_value if action == ':' else q_value[action]
+
+    def update(self, observation, action, alpha, delta):
+        self.num_updates += 1
+        # alpha is not used, self.alpha is used instead
+        features = np.array(self.feature(observation) + (1,))
+        #print(delta_step, features, self.weights)
+        self.weights[:, action] += self.alpha * delta * features
+        print(delta, features)
+        print(self.num_updates, self.weights)
 
 class TrajectoryBuffer(Buffer):
     def __init__(self, gamma, buffer_size = 1):
@@ -167,7 +197,8 @@ class MonteCarlo(Learning):
             super(MonteCarlo, self).step()
             # Q(s,a) = Q(s,a) + alpha * (Gt - Q(s, a))
             for observation, next_observation, action, reward, future_rewards in self.trajectory[0]:
-                self.q_table[observation, action] += self.alpha * (future_rewards - self.q_table[observation, action])
+                #self.q_table[observation, action] += self.alpha * (future_rewards - self.q_table[observation, action])
+                self.q_table.update(observation, action, self.alpha, (future_rewards - self.q_table[observation, action]))
             self.trajectory.reset()
 
 class TD(Learning):
@@ -175,7 +206,8 @@ class TD(Learning):
         observation, action, next_observation, reward, done, next_action = transition
         super(TD, self).step()
         # Q(s,a) = Q(s,a) + alpha * (R(t) + gamma * Q(s', a') - Q(s, a))
-        self.q_table[observation, action] += self.alpha * self.delta(*transition)
+        #self.q_table[observation, action] += self.alpha * self.delta(*transition)
+        self.q_table.update(observation, action, self.alpha, self.delta(*transition))
 
 class Sarsa(TD):
     def delta(self, *transition):
@@ -201,7 +233,7 @@ class SarsaLambda(Sarsa):
     def __init__(self, alpha, gamma, q_table, lmda):
         super(SarsaLambda, self).__init__(alpha, gamma, q_table)
         self.lmda = lmda
-        self.eligibility_traces = copy.deepcopy(q_table)
+        self.eligibility_traces = QTable(q_table.n_observation, q_table.n_action)
 
     def step(self, *transition):
         observation, action, next_observation, reward, done, next_action = transition
@@ -238,19 +270,25 @@ class Agent(object):
     _ID = count(0)
     LEARN_METHODS = ['MC', 'Sarsa', 'ExpectedSarsa', 'SarsaLambda', 'ExpectedSarsaLambda', 'QLearning', 'QLearningLambda']
     POLICIES = ['EpsilonGreedy', 'Softmax']
+    Q_FUNC = ['Table', 'Linear']
 
-    def __init__(self, n_observation, n_action, policy = 'EpsilonGreedy', learn_method = 'QLearning'):
+    def __init__(self, n_observation, n_action, policy = 'EpsilonGreedy', learn_method = 'QLearning', q_func = 'Table', feature = None):
         # hyper parameters
         self.epsilon = 0.5      # EpsilonGreedy
         self.temperature = 1    # Softmax policy
         self.alpha = 0.3        # learning rate
+        self.q_linear_alpha = 0.1
         self.gamma = 0.9
         self.lmda = 0.5
 
         self.actions = list(range(n_action))
         self.n_observation = n_observation
         self.n_action = n_action
-        self.q_table = QTable(n_observation, n_action)
+        self.feature = feature
+
+        q_functions = {'Table': QTable(n_observation, n_action),
+                       'Linear': QLinear(n_observation, n_action, self.q_linear_alpha, self.feature)}
+        self.q_table = q_functions[q_func]
 
         policies = {'EpsilonGreedy': EpsilonGreedy(self.q_table, self.epsilon),
                     'Softmax': Softmax(self.q_table, self.temperature)}
@@ -341,11 +379,37 @@ class Taxi(Game):
         super(Taxi, self).__init__('Taxi-v2')
         self.num_avg_history = 100
         self.agents = {}
-        for policy in Agent.POLICIES:
-            for learn_method in Agent.LEARN_METHODS:
-                if learn_method == 'MC': continue
-                key = '{}/{}'.format(learn_method, policy)
-                self.agents[key] = Agent(self.env.observation_space.n, self.env.action_space.n, policy, learn_method)
+        for q_func in Agent.Q_FUNC:
+            if q_func == 'Table': continue
+            for policy in Agent.POLICIES:
+                if policy == 'EpsilonGreedy': continue
+                if q_func == 'Table':
+                    learn_methods = Agent.LEARN_METHODS
+                else:
+                    learn_methods = ['Sarsa', 'ExpectedSarsa', 'QLearning']
+                for learn_method in learn_methods:
+                    if learn_method == 'MC': continue
+                    key = '{}/{}/{}'.format(q_func, learn_method, policy)
+                    self.agents[key] = Agent(self.env.observation_space.n, self.env.action_space.n, policy, learn_method, q_func, self.feature)
+
+    def feature(self, observation):
+        def _pos(pos_index):
+            pos_x = [0, 4, 0, 3]
+            pos_y = [0, 0, 4, 4]
+            return pos_x[pos_index], pos_y[pos_index]
+        taxi = int(observation / 20)                # 0~24
+        passenger = int((observation % 20) / 4)     # 0~4, RED, 0:R, 1:G, 2:Y, 3:B, 4:Taxi
+        destination = observation % 4               # 0~3, Purple, 0:R, 1:G, 2:Y, 3:B
+
+        taxi_x, taxi_y = taxi % 5, int(taxi / 5)
+        if passenger == 4:
+            passenger_in_car = 1
+            passenger_x, passenger_y = taxi_x, taxi_y
+        else:
+            passenger_in_car = 0
+            passenger_x, passenger_y = _pos(passenger)
+        destination_x, destination_y = _pos(destination)
+        return (taxi_x, taxi_y, passenger_x, passenger_y, destination_x, destination_y)
 
     def run(self, episodes):
         rewards_history, num_steps_history = {}, {}
@@ -365,7 +429,7 @@ class Taxi(Game):
 if __name__ == '__main__':
     game = Taxi()
     #game.run(episodes = 200000)
-    game.run(episodes = 10000)
+    game.run(episodes = 1000)
 
     ## The output is:
     
