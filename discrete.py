@@ -44,7 +44,8 @@ class QLinear(object):
         self.alpha = alpha
         self.feature = feature
         self.n_feature = len(feature(0)) + 1   # include bias
-        self.weights = np.random.randn(self.n_feature, n_action) / np.sqrt(self.n_feature)
+        #self.weights = np.random.randn(self.n_feature, n_action) / np.sqrt(self.n_feature)
+        self.weights = np.zeros((self.n_feature, n_action))
         self.num_updates = 0
 
     def __getitem__(self, key):
@@ -60,10 +61,11 @@ class QLinear(object):
         self.num_updates += 1
         # alpha is not used, self.alpha is used instead
         features = np.array(self.feature(observation) + (1,))
+        print('features, delta:', features, delta)
         #print(delta_step, features, self.weights)
         self.weights[:, action] += self.alpha * delta * features
-        print(delta, features)
-        print(self.num_updates, self.weights)
+        #print(delta, features)
+        #print(self.num_updates, self.weights)
 
 class TrajectoryBuffer(Buffer):
     def __init__(self, gamma, buffer_size = 1):
@@ -205,15 +207,19 @@ class TD(Learning):
     def step(self, *transition):
         observation, action, next_observation, reward, done, next_action = transition
         super(TD, self).step()
+        delta = reward if done and reward > 0 else self.delta(*transition)
         # Q(s,a) = Q(s,a) + alpha * (R(t) + gamma * Q(s', a') - Q(s, a))
         #self.q_table[observation, action] += self.alpha * self.delta(*transition)
-        self.q_table.update(observation, action, self.alpha, self.delta(*transition))
+        self.q_table.update(observation, action, self.alpha, delta)
+        print('q_table after update:', self.q_table[observation, :])
 
 class Sarsa(TD):
     def delta(self, *transition):
         observation, action, next_observation, reward, done, next_action = transition
         # delta = R(t) + gamma * Q(s', a') - Q(s, a)
         delta = reward + self.gamma * self.q_table[next_observation, next_action] - self.q_table[observation, action]
+        print('Action/next:', action, next_action)
+        print('Q_next, Q, reward, delta:', self.q_table[next_observation, next_action], self.q_table[observation, action], reward, delta)
         return delta
 
 class ExpectedSarsa(TD):
@@ -238,8 +244,9 @@ class SarsaLambda(Sarsa):
     def step(self, *transition):
         observation, action, next_observation, reward, done, next_action = transition
         super(TD, self).step()
+        delta = reward if done and reward > 0 else self.delta(*transition)
         self.eligibility_traces[observation, action] += 1
-        self.q_table.buffer += self.alpha * self.delta(*transition) * self.eligibility_traces.buffer
+        self.q_table.buffer += self.alpha * delta * self.eligibility_traces.buffer
         self.eligibility_traces.buffer *= self.gamma * self.lmda
 
 class ExpectedSarsaLambda(SarsaLambda):
@@ -277,7 +284,7 @@ class Agent(object):
         self.epsilon = 0.5      # EpsilonGreedy
         self.temperature = 1    # Softmax policy
         self.alpha = 0.3        # learning rate
-        self.q_linear_alpha = 0.1
+        self.q_linear_alpha = 0.001
         self.gamma = 0.9
         self.lmda = 0.5
 
@@ -409,7 +416,7 @@ class Taxi(Game):
             passenger_in_car = 0
             passenger_x, passenger_y = _pos(passenger)
         destination_x, destination_y = _pos(destination)
-        return (taxi_x, taxi_y, passenger_x, passenger_y, destination_x, destination_y)
+        return (taxi_x, taxi_y, passenger_x, passenger_y, destination_x, destination_y, passenger_in_car)
 
     def run(self, episodes):
         rewards_history, num_steps_history = {}, {}
