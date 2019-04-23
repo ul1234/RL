@@ -9,6 +9,13 @@ import matplotlib.pyplot as plt
 from collections import deque
 from itertools import count
 
+debug_enable = 0
+def debug_print(*args):
+    global debug_enable
+    if debug_enable:
+        print(*args)
+
+
 class Buffer(object):
     def __getitem__(self, key):
         if isinstance(key, tuple):
@@ -61,11 +68,11 @@ class QLinear(object):
         self.num_updates += 1
         # alpha is not used, self.alpha is used instead
         features = np.array(self.feature(observation) + (1,))
-        print('features, delta:', features, delta)
-        #print(delta_step, features, self.weights)
+        debug_print('features, delta:', features, delta)
+        #debug_print(delta_step, features, self.weights)
         self.weights[:, action] += self.alpha * delta * features
-        #print(delta, features)
-        #print(self.num_updates, self.weights)
+        #debug_print(delta, features)
+        #debug_print(self.num_updates, self.weights)
 
 class TrajectoryBuffer(Buffer):
     def __init__(self, gamma, buffer_size = 1):
@@ -211,15 +218,15 @@ class TD(Learning):
         # Q(s,a) = Q(s,a) + alpha * (R(t) + gamma * Q(s', a') - Q(s, a))
         #self.q_table[observation, action] += self.alpha * self.delta(*transition)
         self.q_table.update(observation, action, self.alpha, delta)
-        print('q_table after update:', self.q_table[observation, :])
+        debug_print('q_table after update:', self.q_table[observation, :])
 
 class Sarsa(TD):
     def delta(self, *transition):
         observation, action, next_observation, reward, done, next_action = transition
         # delta = R(t) + gamma * Q(s', a') - Q(s, a)
         delta = reward + self.gamma * self.q_table[next_observation, next_action] - self.q_table[observation, action]
-        print('Action/next:', action, next_action)
-        print('Q_next, Q, reward, delta:', self.q_table[next_observation, next_action], self.q_table[observation, action], reward, delta)
+        debug_print('Action/next:', action, next_action)
+        debug_print('Q_next, Q, reward, delta:', self.q_table[next_observation, next_action], self.q_table[observation, action], reward, delta)
         return delta
 
 class ExpectedSarsa(TD):
@@ -284,8 +291,8 @@ class Agent(object):
         self.epsilon = 0.5      # EpsilonGreedy
         self.temperature = 1    # Softmax policy
         self.alpha = 0.3        # learning rate
-        self.q_linear_alpha = 0.001
-        self.gamma = 0.9
+        self.q_linear_alpha = 0.01
+        self.gamma = 0.99
         self.lmda = 0.5
 
         self.actions = list(range(n_action))
@@ -347,6 +354,8 @@ class Game(object):
             next_observation, reward, done, info = self.env.step(action)
             shaping_reward = reward if not self.reward_shaping_enable else self.reward_shaping(observation, next_observation, reward)
             next_action = agent.act(next_observation)
+            if done and reward > 0:
+                print('done: reward:', reward)
             agent.step(observation, action, next_observation, reward, done, next_action)
             observation, action = next_observation, next_action
             num_steps += 1
@@ -364,6 +373,9 @@ class Game(object):
             num_steps_history.append(num_steps)
             if episode % 500 == 0:
                 print('[{}] episode {}: steps {}, rewards: {}, shaping_rewards: {}, num_learns: {}'.format(agent.name, episode, num_steps, rewards, shaping_rewards, agent.learn.num_learns))
+                #if episode >= 1000:
+                #    global debug_enable
+                #    debug_enable = 1
             if self.resolved(rewards, episodes): break
         print('\n')
         return self.avg_history(rewards_history, shaping_rewards_history, num_steps_history)
@@ -389,11 +401,11 @@ class Taxi(Game):
         for q_func in Agent.Q_FUNC:
             if q_func == 'Table': continue
             for policy in Agent.POLICIES:
-                if policy == 'EpsilonGreedy': continue
+                if policy == 'Softmax': continue
                 if q_func == 'Table':
                     learn_methods = Agent.LEARN_METHODS
                 else:
-                    learn_methods = ['Sarsa', 'ExpectedSarsa', 'QLearning']
+                    learn_methods = ['Sarsa'] #['Sarsa', 'ExpectedSarsa', 'QLearning']
                 for learn_method in learn_methods:
                     if learn_method == 'MC': continue
                     key = '{}/{}/{}'.format(q_func, learn_method, policy)
@@ -413,10 +425,10 @@ class Taxi(Game):
             passenger_in_car = 1
             passenger_x, passenger_y = taxi_x, taxi_y
         else:
-            passenger_in_car = 0
+            passenger_in_car = -1
             passenger_x, passenger_y = _pos(passenger)
         destination_x, destination_y = _pos(destination)
-        return (taxi_x, taxi_y, passenger_x, passenger_y, destination_x, destination_y, passenger_in_car)
+        return (taxi_x + 1, taxi_y + 1, passenger_x + 1, passenger_y + 1, destination_x + 1, destination_y + 1, passenger_in_car)
 
     def run(self, episodes):
         rewards_history, num_steps_history = {}, {}
@@ -436,7 +448,7 @@ class Taxi(Game):
 if __name__ == '__main__':
     game = Taxi()
     #game.run(episodes = 200000)
-    game.run(episodes = 1000)
+    game.run(episodes = 10000)
 
     ## The output is:
     
