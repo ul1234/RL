@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from collections import deque
 from itertools import count
+import pandas as pd
 
 debug_enable = 0
 def debug_print(*args):
@@ -42,8 +43,23 @@ class QTable(Buffer):
         self.n_action = n_action
         self.buffer = np.zeros((n_observation, n_action))
 
+        reorder_observation = []
+        for observation in range(n_observation):
+            taxi = int(observation / 20)                # 0~24
+            passenger = int((observation % 20) / 4)     # 0~4, RED, 0:R, 1:G, 2:Y, 3:B, 4:Taxi
+            destination = observation % 4               # 0~3, Purple, 0:R, 1:G, 2:Y, 3:B
+            reorder_observation.append(destination * 25*5 + passenger * 25 + taxi)
+        self.reorder_observation = list(range(n_observation))
+        for observation in range(n_observation):
+            self.reorder_observation[reorder_observation[observation]] = observation
+
     def update(self, observation, action, alpha, delta):
         self[observation, action] += alpha * delta
+
+    def result(self):
+        #return copy.deepcopy(self.buffer)
+        q_result = np.array(pd.DataFrame(self.buffer).reindex(index=self.reorder_observation))
+        return q_result
 
 class QLinear(object):
     def __init__(self, n_observation, n_action, alpha, feature):
@@ -55,6 +71,16 @@ class QLinear(object):
         #self.weights = np.random.randn(self.n_feature, n_action) / np.sqrt(self.n_feature)
         self.weights = np.zeros((self.n_feature, n_action))
         self.num_updates = 0
+
+        reorder_observation = []
+        for observation in range(n_observation):
+            taxi = int(observation / 20)                # 0~24
+            passenger = int((observation % 20) / 4)     # 0~4, RED, 0:R, 1:G, 2:Y, 3:B, 4:Taxi
+            destination = observation % 4               # 0~3, Purple, 0:R, 1:G, 2:Y, 3:B
+            reorder_observation.append(destination * 25*5 + passenger * 25 + taxi)
+        self.reorder_observation = list(range(n_observation))
+        for observation in range(n_observation):
+            self.reorder_observation[reorder_observation[observation]] = observation
 
     def __getitem__(self, key):
         if isinstance(key, tuple):
@@ -74,6 +100,13 @@ class QLinear(object):
         self.weights[:, action] += self.alpha * delta * features
         #debug_print(delta, features)
         #debug_print(self.num_updates, self.weights)
+
+    def result(self):
+        q_result = np.zeros((self.n_observation, self.n_action))
+        for observation in range(self.n_observation):
+            q_result[observation, :] = self[observation, :]
+        q_result = np.array(pd.DataFrame(q_result).reindex(index=self.reorder_observation))
+        return q_result
 
 class TrajectoryBuffer(Buffer):
     def __init__(self, gamma, buffer_size = 1):
@@ -300,7 +333,7 @@ class Agent(object):
         self.epsilon = 0.5      # EpsilonGreedy
         self.temperature = 1    # Softmax policy
         self.alpha = 0.3        # learning rate
-        self.q_linear_alpha = 0.01
+        self.q_linear_alpha = 0.001
         self.gamma = 0.99
         self.lmda = 0.5
 
@@ -364,8 +397,7 @@ class Game(object):
             next_observation, reward, done, info = self.env.step(action)
             shaping_reward = reward if not self.reward_shaping_enable else self.reward_shaping(observation, next_observation, reward)
             next_action = agent.act(next_observation)
-            if done and reward > 0:
-                print('done: reward:', reward)
+            #if done and reward > 0: print('done: reward:', reward)
             agent.step(observation, action, next_observation, reward, done, next_action)
             observation, action = next_observation, next_action
             num_steps += 1
@@ -381,8 +413,8 @@ class Game(object):
             rewards_history.append(rewards)
             shaping_rewards_history.append(shaping_rewards)
             num_steps_history.append(num_steps)
-            if episode % 500 == 0:
-                print('[{}] episode {}: steps {}, rewards: {}, shaping_rewards: {}, num_learns: {}'.format(agent.name, episode, num_steps, rewards, shaping_rewards, agent.learn.num_learns))
+            #if episode % 500 == 0:
+            #    print('[{}] episode {}: steps {}, rewards: {}, shaping_rewards: {}, num_learns: {}'.format(agent.name, episode, num_steps, rewards, shaping_rewards, agent.learn.num_learns))
                 #if episode >= 1000:
                 #    global debug_enable
                 #    debug_enable = 1
@@ -434,7 +466,9 @@ class Taxi(Game):
             passenger_in_car = -1
             passenger_x, passenger_y = _pos(passenger)
         destination_x, destination_y = _pos(destination)
-        return (taxi_x + 1, taxi_y + 1, passenger_x + 1, passenger_y + 1, destination_x + 1, destination_y + 1, passenger_in_car)
+        return (taxi_x + 1, taxi_y + 1, passenger_x + 1, passenger_y + 1, destination_x + 1, destination_y + 1, passenger_in_car,
+            (taxi_x + 1)*(passenger_x + 1), (taxi_y + 1)*(passenger_y + 1), (taxi_x + 1)*(destination_x + 1), (taxi_y + 1)*(destination_y + 1), 
+            )
 
     def agents_table_control_1(self):
         self.agents = {}
@@ -447,31 +481,42 @@ class Taxi(Game):
 
     def agents_prediction_1(self):
         self.agents = {}
-        for q_func in ['Table']:
-            for policy in ['Random']:
+        for q_func in ['Linear']:
+            for policy in ['EpsilonGreedy']:
                 for learn_method in ['Sarsa']:
                     key = '{}/{}/{}'.format(q_func, learn_method, policy)
                     self.agents[key] = Agent(self.env.observation_space.n, self.env.action_space.n, policy, learn_method, q_func, self.feature)
 
     def run_prediction_1(self, episodes):
-        show_q_episodes = [1, 100, 500, 1000]
+        #show_q_episodes = [1, 100, 500, 1000]
+        show_q_episodes = list(range(1, 200, 10))
         episodes_diff = [show_q_episodes[0]] + [y - x for x, y in zip(show_q_episodes[:-1], show_q_episodes[1:])]
         print(episodes_diff)
-        
+        plt.ion()
+
         q_result = {}
         for idx, episodes in enumerate(episodes_diff):
             rewards_history, num_steps_history = {}, {}
             for key, agent in self.agents.items():
                 rewards_history[key], _, num_steps_history[key] = self.run_episodes(agent, episodes)
-                q_result[idx] = copy.deepcopy(agent.q_table.buffer)
+                #q_result[idx] = copy.deepcopy(agent.q_table.buffer)
+                q_result[idx] = agent.q_table.result()
         for action in range(self.env.action_space.n):
             fig = plt.figure()
+            ax = fig.add_subplot(1,1,1)
+            lines = None
+
             colors = ['b--', 'r--', 'g--', 'k--', 'm--', 'y--', 'c--',
                       'b', 'r', 'g', 'k', 'm', 'y', 'c']
             for idx, episodes in enumerate(show_q_episodes):
                 q = q_result[idx][:, action]
-                plt.plot(q, colors[idx], label = episodes)
-            plt.legend()
+                if lines: ax.lines.remove(lines[0])
+                #lines = plt.plot(q, colors[idx], label = episodes)
+                lines = plt.plot(q)
+                plt.title('Action {}, episodes {}'.format(action, episodes))
+                plt.pause(0.5)
+            #plt.legend()
+        plt.ioff()
         plt.show()
 
     def run_table_control_1(self, episodes):
