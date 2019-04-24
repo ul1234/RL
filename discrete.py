@@ -6,6 +6,7 @@ import numpy as np
 import random
 import time, pprint, copy
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 from collections import deque
 from itertools import count
 
@@ -35,7 +36,7 @@ class QTable(Buffer):
         self.buffer = np.zeros((n_observation, n_action))
 
     def update(self, observation, action, alpha, delta):
-        self.buffer[observation, action] += alpha * delta
+        self[observation, action] += alpha * delta
 
 class QLinear(object):
     def __init__(self, n_observation, n_action, alpha, feature):
@@ -51,7 +52,7 @@ class QLinear(object):
         if isinstance(key, tuple):
             observation, action = key
         else:
-            observation, action = key, ':'    
+            observation, action = key, ':'
         features = np.array(self.feature(observation) + (1,))
         q_value = np.dot(features, self.weights)
         return q_value if action == ':' else q_value[action]
@@ -141,6 +142,14 @@ class EpsilonGreedy(Policy):
 
     def __repr__(self):
         return '[{}] Epsilon: {}'.format(self.__class__.__name__, self.epsilon)
+
+class Random(EpsilonGreedy):
+    def __init__(self, q_table):
+        # epsilon is always 1, random policy
+        super(Random, self).__init__(q_table, epsilon = 1)
+
+    def step(self, num_learns):
+        super(EpsilonGreedy, self).step()
 
 class Softmax(Policy):
     def __init__(self, q_table, temperature = 1):
@@ -269,7 +278,7 @@ class QLearningLambda(SarsaLambda):
 class Agent(object):
     _ID = count(0)
     LEARN_METHODS = ['MC', 'Sarsa', 'ExpectedSarsa', 'SarsaLambda', 'ExpectedSarsaLambda', 'QLearning', 'QLearningLambda']
-    POLICIES = ['EpsilonGreedy', 'Softmax']
+    POLICIES = ['EpsilonGreedy', 'Softmax', 'Random']
     Q_FUNC = ['Table', 'Linear']
 
     def __init__(self, n_observation, n_action, policy = 'EpsilonGreedy', learn_method = 'QLearning', q_func = 'Table', feature = None):
@@ -291,7 +300,8 @@ class Agent(object):
         self.q_table = q_functions[q_func]
 
         policies = {'EpsilonGreedy': EpsilonGreedy(self.q_table, self.epsilon),
-                    'Softmax': Softmax(self.q_table, self.temperature)}
+                    'Softmax': Softmax(self.q_table, self.temperature),
+                    'Random': Random(self.q_table)}
         self.policy = policies[policy]
 
         learn_methods = {'MC': MonteCarlo(self.alpha, self.gamma, self.q_table),
@@ -378,19 +388,15 @@ class Taxi(Game):
     def __init__(self):
         super(Taxi, self).__init__('Taxi-v2')
         self.num_avg_history = 100
-        self.agents = {}
-        for q_func in Agent.Q_FUNC:
-            if q_func == 'Table': continue
-            for policy in Agent.POLICIES:
-                if policy == 'EpsilonGreedy': continue
-                if q_func == 'Table':
-                    learn_methods = Agent.LEARN_METHODS
-                else:
-                    learn_methods = ['Sarsa', 'ExpectedSarsa', 'QLearning']
-                for learn_method in learn_methods:
-                    if learn_method == 'MC': continue
-                    key = '{}/{}/{}'.format(q_func, learn_method, policy)
-                    self.agents[key] = Agent(self.env.observation_space.n, self.env.action_space.n, policy, learn_method, q_func, self.feature)
+        mode = 1
+        if mode == 1:
+            self.agents_prediction_1()
+            self.run = self.run_prediction_1
+        elif mode == 2:
+            self.agents_table_control_1()
+            self.run = self.run_table_control_1
+        else:
+            raise
 
     def feature(self, observation):
         def _pos(pos_index):
@@ -409,13 +415,51 @@ class Taxi(Game):
             passenger_in_car = 0
             passenger_x, passenger_y = _pos(passenger)
         destination_x, destination_y = _pos(destination)
-        return (taxi_x, taxi_y, passenger_x, passenger_y, destination_x, destination_y)
+        return (taxi_x, taxi_y, passenger_x, passenger_y, destination_x, destination_y, passenger_in_car)
 
-    def run(self, episodes):
+    def agents_table_control_1(self):
+        self.agents = {}
+        for q_func in ['Table']:
+            for policy in ['EpsilonGreedy', 'Softmax']:
+                for learn_method in Agent.LEARN_METHODS:
+                    if learn_method == 'MC': continue
+                    key = '{}/{}/{}'.format(q_func, learn_method, policy)
+                    self.agents[key] = Agent(self.env.observation_space.n, self.env.action_space.n, policy, learn_method, q_func, self.feature)
+
+    def agents_prediction_1(self):
+        self.agents = {}
+        for q_func in ['Table']:
+            for policy in ['Random']:
+                for learn_method in ['Sarsa']:
+                    key = '{}/{}/{}'.format(q_func, learn_method, policy)
+                    self.agents[key] = Agent(self.env.observation_space.n, self.env.action_space.n, policy, learn_method, q_func, self.feature)
+
+    def run_prediction_1(self, episodes):
+        show_q_episodes = [1, 100, 500, 1000]
+        episodes_diff = [show_q_episodes[0]] + [y - x for x, y in zip(show_q_episodes[:-1], show_q_episodes[1:])]
+        print(episodes_diff)
+        
+        q_result = {}
+        for idx, episodes in enumerate(episodes_diff):
+            rewards_history, num_steps_history = {}, {}
+            for key, agent in self.agents.items():
+                rewards_history[key], _, num_steps_history[key] = self.run_episodes(agent, episodes)
+                q_result[idx] = copy.deepcopy(agent.q_table.buffer)
+        for action in range(self.env.action_space.n):
+            fig = plt.figure()
+            colors = ['b--', 'r--', 'g--', 'k--', 'm--', 'y--', 'c--',
+                      'b', 'r', 'g', 'k', 'm', 'y', 'c']
+            for idx, episodes in enumerate(show_q_episodes):
+                q = q_result[idx][:, action]
+                plt.plot(q, colors[idx], label = episodes)
+            plt.legend()
+        plt.show()
+
+    def run_table_control_1(self, episodes):
         rewards_history, num_steps_history = {}, {}
         for key, agent in self.agents.items():
             rewards_history[key], _, num_steps_history[key] = self.run_episodes(agent, episodes)
-        plt.figure()
+        fig = plt.figure()
         colors = ['b--', 'r--', 'g--', 'k--', 'm--', 'y--', 'c--',
                   'b', 'r', 'g', 'k', 'm', 'y', 'c']
         for index, (key, rewards) in enumerate(rewards_history.items()):
@@ -432,7 +476,7 @@ if __name__ == '__main__':
     game.run(episodes = 1000)
 
     ## The output is:
-    
+
     ##[Agent 0: MonteCarlo/EpsilonGreedy] Epsilon: 1.7526333124414336e-05, Alpha: 1.0515799874648609e-05, Gamma: 0.9, Lambda: 0.5
     ##Best Avg Rewards: 9.04 in 153024/200000 episodes
     ##[Agent 1: Sarsa/EpsilonGreedy] Epsilon: 4.888987831561423e-05, Alpha: 2.933392698936855e-05, Gamma: 0.9, Lambda: 0.5
