@@ -256,11 +256,18 @@ class TD(Learning):
     def step(self, *transition):
         observation, action, next_observation, reward, done, next_action = transition
         super(TD, self).step()
-        delta = reward if done and reward > 0 else self.delta(*transition)
+        delta = reward - self.q_table[observation, action] if done and reward > 0 else self.delta(*transition)
+        #if done and reward > 0:
+        #    print('reward:', reward, 'delta:', delta, 'action:', action)
+        #    print('q_table before update:', self.q_table[observation, :])
+        #    print('weights before update:', self.q_table.weights[:, action])
+        #    print('observation:', observation, 'features:', np.array(self.q_table.feature(observation) + (1,)))
         # Q(s,a) = Q(s,a) + alpha * (R(t) + gamma * Q(s', a') - Q(s, a))
         #self.q_table[observation, action] += self.alpha * self.delta(*transition)
         self.q_table.update(observation, action, self.alpha, delta)
-        debug_print('q_table after update:', self.q_table[observation, :])
+        #if done and reward > 0:
+        #    print('q_table after update:', self.q_table[observation, :])
+        #    print('weights after update:', self.q_table.weights[:, action])
 
 class Sarsa(TD):
     def delta(self, *transition):
@@ -293,7 +300,7 @@ class SarsaLambda(Sarsa):
     def step(self, *transition):
         observation, action, next_observation, reward, done, next_action = transition
         super(TD, self).step()
-        delta = reward if done and reward > 0 else self.delta(*transition)
+        delta = reward - self.q_table[observation, action] if done and reward > 0 else self.delta(*transition)
         self.eligibility_traces[observation, action] += 1
         self.q_table.buffer += self.alpha * delta * self.eligibility_traces.buffer
         self.eligibility_traces.buffer *= self.gamma * self.lmda
@@ -333,7 +340,7 @@ class Agent(object):
         self.epsilon = 0.5      # EpsilonGreedy
         self.temperature = 1    # Softmax policy
         self.alpha = 0.3        # learning rate
-        self.q_linear_alpha = 0.001
+        self.q_linear_alpha = 0.03
         self.gamma = 0.99
         self.lmda = 0.5
 
@@ -413,8 +420,8 @@ class Game(object):
             rewards_history.append(rewards)
             shaping_rewards_history.append(shaping_rewards)
             num_steps_history.append(num_steps)
-            #if episode % 500 == 0:
-            #    print('[{}] episode {}: steps {}, rewards: {}, shaping_rewards: {}, num_learns: {}'.format(agent.name, episode, num_steps, rewards, shaping_rewards, agent.learn.num_learns))
+            if episode % 500 == 0:
+                print('[{}] episode {}: steps {}, rewards: {}, shaping_rewards: {}, num_learns: {}'.format(agent.name, episode, num_steps, rewards, shaping_rewards, agent.learn.num_learns))
                 #if episode >= 1000:
                 #    global debug_enable
                 #    debug_enable = 1
@@ -439,7 +446,7 @@ class Taxi(Game):
     def __init__(self):
         super(Taxi, self).__init__('Taxi-v2')
         self.num_avg_history = 100
-        mode = 1
+        mode = 2
         if mode == 1:
             self.agents_prediction_1()
             self.run = self.run_prediction_1
@@ -466,9 +473,16 @@ class Taxi(Game):
             passenger_in_car = -1
             passenger_x, passenger_y = _pos(passenger)
         destination_x, destination_y = _pos(destination)
-        return (taxi_x + 1, taxi_y + 1, passenger_x + 1, passenger_y + 1, destination_x + 1, destination_y + 1, passenger_in_car,
-            (taxi_x + 1)*(passenger_x + 1), (taxi_y + 1)*(passenger_y + 1), (taxi_x + 1)*(destination_x + 1), (taxi_y + 1)*(destination_y + 1), 
-            )
+        # normalize
+        taxi_x, taxi_y = (taxi_x-2)/2, (taxi_y-2)/2     # -1 ~ +1
+        passenger_x, passenger_y = (passenger_x-2)/2, (passenger_y-2)/2     # -1 ~ +1
+        destination_x, destination_y = (destination_x-2)/2, (destination_y-2)/2     # -1 ~ +1
+        
+        #return (taxi_x, taxi_y, passenger_x, passenger_y, destination_x, destination_y, passenger_in_car,
+        #        taxi_x**2, taxi_y**2, passenger_x**2, passenger_y**2, destination_x**2, destination_y**2,
+        #       taxi_x*passenger_x, taxi_y*passenger_y, taxi_x*destination_x, taxi_y*destination_y, passenger_x*destination_x, passenger_y*destination_y)
+        return ((taxi_x-passenger_x+0.5), (taxi_y-passenger_y+0.5), (passenger_x-destination_x+0.5), (passenger_y-destination_y+0.5), 
+                passenger_in_car*(taxi_x-passenger_x+0.5), passenger_in_car*(taxi_y-passenger_y+0.5), passenger_in_car*(passenger_x-destination_x+0.5), passenger_in_car*(passenger_y-destination_y+0.5))
 
     def agents_table_control_1(self):
         self.agents = {}
@@ -501,7 +515,8 @@ class Taxi(Game):
                 rewards_history[key], _, num_steps_history[key] = self.run_episodes(agent, episodes)
                 #q_result[idx] = copy.deepcopy(agent.q_table.buffer)
                 q_result[idx] = agent.q_table.result()
-        for action in range(self.env.action_space.n):
+        #for action in range(self.env.action_space.n):
+        for action in [5]:
             fig = plt.figure()
             ax = fig.add_subplot(1,1,1)
             lines = None
@@ -536,8 +551,8 @@ class Taxi(Game):
 
 if __name__ == '__main__':
     game = Taxi()
-    #game.run(episodes = 200000)
-    game.run(episodes = 10000)
+    game.run(episodes = 200000)
+    #game.run(episodes = 10000)
 
     ## The output is:
 
