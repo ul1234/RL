@@ -156,6 +156,22 @@ class Policy(object):
     def step(self):
         self.steps += 1
 
+class TablePolicy(Policy):
+    # q_table is directly probability of action
+    def act(self, observation):
+        action_prob = self.q_table[observation, :]
+        n = np.random.rand()
+        for action, prob in enumerate(q_prob):
+            if n < prob: break
+            n -= prob
+        return action
+
+    def action_prob(self, observation):
+        return self.q_table[observation, :]
+
+    def __repr__(self):
+        return '[{}]'.format(self.__class__.__name__)
+
 class EpsilonGreedy(Policy):
     def __init__(self, q_table, epsilon = 0.1):
         super(EpsilonGreedy, self).__init__(q_table)
@@ -222,6 +238,30 @@ class Softmax(Policy):
 
     def __repr__(self):
         return '[{}] Temperature: {}'.format(self.__class__.__name__, self.temperature)
+
+class PolicyLearning(object):
+    def __init__(self, alpha, q_table, policy_table):
+        self.alpha = alpha
+        self.policy_table = policy_table
+        self.q_table = q_table
+
+    def from_prob(self, prob):
+        # return of 1/(1+exp(-z))
+        return -np.log(1/prob - 1)
+
+    def to_prob(self, value):
+        return 1/(1 + np.exp(-value))
+
+    def step(self, *transition):
+        observation, action, next_observation, reward, done, next_action = transition
+        value = np.sum(self.policy_table[observation, :] * self.q_table[next_observation, :])
+        advantage = self.q_table[observation, action] - value
+        new_prob = self.to_prob(self.from_prob(self.policy_table[observation, action]) + self.alpha * advantage)
+        delta_prob = new_prob - self.policy_table[observation, action]
+        n_action = self.q_table.shape[1]
+        other_delta_prob = -delta_prob / (n_action - 1)
+        self.policy_table[observation, :] += other_delta_prob
+        self.policy_table[observation, action] = new_prob
 
 class Learning(object):
     def __init__(self, alpha, gamma, q_table):
@@ -341,6 +381,7 @@ class Agent(object):
         self.temperature = 1    # Softmax policy
         self.alpha = 0.3        # learning rate
         self.q_linear_alpha = 0.03
+        self.policy_alpha = 0.1
         self.gamma = 0.99
         self.lmda = 0.5
 
@@ -355,7 +396,8 @@ class Agent(object):
 
         policies = {'EpsilonGreedy': EpsilonGreedy(self.q_table, self.epsilon),
                     'Softmax': Softmax(self.q_table, self.temperature),
-                    'Random': Random(self.q_table)}
+                    'Random': Random(self.q_table),
+                    'TablePolicy': TablePolicy(self.policy_table)}
         self.policy = policies[policy]
 
         learn_methods = {'MC': MonteCarlo(self.alpha, self.gamma, self.q_table),
@@ -366,6 +408,12 @@ class Agent(object):
                          'QLearning': QLearning(self.alpha, self.gamma, self.q_table),
                          'QLearningLambda': QLearningLambda(self.alpha, self.gamma, self.q_table, self.lmda)}
         self.learn = learn_methods[learn_method]
+
+        self.policy_gradient = policy == 'TablePolicy'
+        if self.policy_gradient:
+            self.policy_table = QTable(n_observation, n_action)
+            self.policy_learn = PolicyLearning(self.policy_alpha, self.q_table, self.policy_table)
+
         self.id = next(self._ID)
         self.name = 'Agent {}: {}/{}'.format(self.id, self.learn.__class__.__name__, self.policy.__class__.__name__)
 
@@ -374,6 +422,7 @@ class Agent(object):
 
     def step(self, *transition):
         self.learn.step(*transition)
+        if self.policy_gradient: self.policy_learn.step(*transition)
         self.policy.step(self.learn.num_learns)
 
     def act(self, observation, optimal = False):
