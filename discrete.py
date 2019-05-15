@@ -16,7 +16,7 @@ def debug_print(*args):
     global debug_enable
     if debug_enable:
         print(*args)
-
+print_enable = 0
 
 class Buffer(object):
     def __getitem__(self, key):
@@ -157,11 +157,18 @@ class Policy(object):
         self.steps += 1
 
 class TablePolicy(Policy):
+    def __init__(self, q_table):
+        super(TablePolicy, self).__init__(q_table)
+        self.q_table.buffer += 1/self.q_table.n_action
+        
+    def step(self, num_learns):
+        super(TablePolicy, self).step()
+
     # q_table is directly probability of action
     def act(self, observation):
         action_prob = self.q_table[observation, :]
         n = np.random.rand()
-        for action, prob in enumerate(q_prob):
+        for action, prob in enumerate(action_prob):
             if n < prob: break
             n -= prob
         return action
@@ -219,8 +226,9 @@ class Softmax(Policy):
         if num_learns % 3000 == 0:
            self.temperature = max(0.01, self.temperature * 0.99)
 
-    def softmax(self, q):
-        q_exp = np.exp(q / self.temperature)
+    @classmethod
+    def softmax(self, q, temperature = 1):
+        q_exp = np.exp(q / temperature)
         return q_exp / q_exp.sum()
 
     def act(self, observation):
@@ -234,7 +242,7 @@ class Softmax(Policy):
 
     def action_prob(self, observation):
         q_actions = self.q_table[observation, :]
-        return self.softmax(q_actions)
+        return self.softmax(q_actions, self.temperature)
 
     def __repr__(self):
         return '[{}] Temperature: {}'.format(self.__class__.__name__, self.temperature)
@@ -245,23 +253,28 @@ class PolicyLearning(object):
         self.policy_table = policy_table
         self.q_table = q_table
 
-    def from_prob(self, prob):
-        # return of 1/(1+exp(-z))
-        return -np.log(1/prob - 1)
-
-    def to_prob(self, value):
-        return 1/(1 + np.exp(-value))
-
     def step(self, *transition):
         observation, action, next_observation, reward, done, next_action = transition
         value = np.sum(self.policy_table[observation, :] * self.q_table[next_observation, :])
-        advantage = self.q_table[observation, action] - value
-        new_prob = self.to_prob(self.from_prob(self.policy_table[observation, action]) + self.alpha * advantage)
-        delta_prob = new_prob - self.policy_table[observation, action]
-        n_action = self.q_table.shape[1]
-        other_delta_prob = -delta_prob / (n_action - 1)
-        self.policy_table[observation, :] += other_delta_prob
-        self.policy_table[observation, action] = new_prob
+        #advantage = self.q_table[observation, action] - value
+        advantage = self.q_table[observation, action]
+        #new_prob = self.to_prob(self.from_prob(self.policy_table[observation, action]) + self.alpha * advantage)
+        prob = self.policy_table[observation, :]
+        prob[prob < 0.001] = 0.001
+        log_prob = np.log(prob)
+        log_prob[action] += self.alpha * advantage
+        new_prob = Softmax.softmax(log_prob)
+        #if done and reward > 0:
+        if print_enable:   
+            print('observation:', observation, 'action:', action, 'advantage:', advantage, 'new_prob:', new_prob)
+            #print('q_table:', self.q_table[observation, :])
+            print('policy_table before update:', self.policy_table[observation, :])
+        self.policy_table[observation, :] = new_prob
+        #if done and reward > 0:
+        if print_enable:
+            print('policy_table after update:', self.policy_table[observation, :])
+            print('\n')
+        assert abs(np.sum(self.policy_table[observation, :]) - 1) < 0.001, 'invalid sum of probability %.3f' % np.sum(self.policy_table[observation, :])
 
 class Learning(object):
     def __init__(self, alpha, gamma, q_table):
@@ -298,15 +311,20 @@ class TD(Learning):
         super(TD, self).step()
         delta = reward - self.q_table[observation, action] if done and reward > 0 else self.delta(*transition)
         #if done and reward > 0:
-        #    print('reward:', reward, 'delta:', delta, 'action:', action)
-        #    print('q_table before update:', self.q_table[observation, :])
+        if print_enable:
+            print('observation:', observation, 'reward:', reward, 'delta:', delta, 'action:', action)
+            print('q_table before update:', self.q_table[observation, :])
+            print('softmax before update:', Softmax.softmax(self.q_table[observation, :]))
         #    print('weights before update:', self.q_table.weights[:, action])
         #    print('observation:', observation, 'features:', np.array(self.q_table.feature(observation) + (1,)))
         # Q(s,a) = Q(s,a) + alpha * (R(t) + gamma * Q(s', a') - Q(s, a))
         #self.q_table[observation, action] += self.alpha * self.delta(*transition)
         self.q_table.update(observation, action, self.alpha, delta)
         #if done and reward > 0:
-        #    print('q_table after update:', self.q_table[observation, :])
+        if print_enable:
+            print('q_table after update:', self.q_table[observation, :])
+            print('softmax after update:', Softmax.softmax(self.q_table[observation, :]))
+            print(' ')
         #    print('weights after update:', self.q_table.weights[:, action])
 
 class Sarsa(TD):
@@ -381,7 +399,7 @@ class Agent(object):
         self.temperature = 1    # Softmax policy
         self.alpha = 0.3        # learning rate
         self.q_linear_alpha = 0.03
-        self.policy_alpha = 0.1
+        self.policy_alpha = 0.005 # policy gradient
         self.gamma = 0.99
         self.lmda = 0.5
 
@@ -397,8 +415,15 @@ class Agent(object):
         policies = {'EpsilonGreedy': EpsilonGreedy(self.q_table, self.epsilon),
                     'Softmax': Softmax(self.q_table, self.temperature),
                     'Random': Random(self.q_table),
-                    'TablePolicy': TablePolicy(self.policy_table)}
+                    'TablePolicy': None}
         self.policy = policies[policy]
+
+        self.policy_gradient = policy == 'TablePolicy'
+        if self.policy_gradient:
+            self.policy_table = QTable(n_observation, n_action)
+            self.policy_learn = PolicyLearning(self.policy_alpha, self.q_table, self.policy_table)
+            self.policy = TablePolicy(self.policy_table)
+
 
         learn_methods = {'MC': MonteCarlo(self.alpha, self.gamma, self.q_table),
                          'Sarsa': Sarsa(self.alpha, self.gamma, self.q_table),
@@ -408,11 +433,6 @@ class Agent(object):
                          'QLearning': QLearning(self.alpha, self.gamma, self.q_table),
                          'QLearningLambda': QLearningLambda(self.alpha, self.gamma, self.q_table, self.lmda)}
         self.learn = learn_methods[learn_method]
-
-        self.policy_gradient = policy == 'TablePolicy'
-        if self.policy_gradient:
-            self.policy_table = QTable(n_observation, n_action)
-            self.policy_learn = PolicyLearning(self.policy_alpha, self.q_table, self.policy_table)
 
         self.id = next(self._ID)
         self.name = 'Agent {}: {}/{}'.format(self.id, self.learn.__class__.__name__, self.policy.__class__.__name__)
@@ -472,8 +492,10 @@ class Game(object):
             if episode % 500 == 0:
                 print('[{}] episode {}: steps {}, rewards: {}, shaping_rewards: {}, num_learns: {}'.format(agent.name, episode, num_steps, rewards, shaping_rewards, agent.learn.num_learns))
                 #if episode >= 1000:
-                #    global debug_enable
-                #    debug_enable = 1
+                    #global debug_enable
+                    #debug_enable = 1
+                    #global print_enable
+                    #print_enable = 1
             if self.resolved(rewards, episodes): break
         print('\n')
         return self.avg_history(rewards_history, shaping_rewards_history, num_steps_history)
@@ -495,12 +517,15 @@ class Taxi(Game):
     def __init__(self):
         super(Taxi, self).__init__('Taxi-v2')
         self.num_avg_history = 100
-        mode = 2
+        mode = 3
         if mode == 1:
             self.agents_prediction_1()
             self.run = self.run_prediction_1
         elif mode == 2:
             self.agents_table_control_1()
+            self.run = self.run_table_control_1
+        elif mode == 3:
+            self.agents_policy_gradient()
             self.run = self.run_table_control_1
         else:
             raise
@@ -526,11 +551,11 @@ class Taxi(Game):
         taxi_x, taxi_y = (taxi_x-2)/2, (taxi_y-2)/2     # -1 ~ +1
         passenger_x, passenger_y = (passenger_x-2)/2, (passenger_y-2)/2     # -1 ~ +1
         destination_x, destination_y = (destination_x-2)/2, (destination_y-2)/2     # -1 ~ +1
-        
+
         #return (taxi_x, taxi_y, passenger_x, passenger_y, destination_x, destination_y, passenger_in_car,
         #        taxi_x**2, taxi_y**2, passenger_x**2, passenger_y**2, destination_x**2, destination_y**2,
         #       taxi_x*passenger_x, taxi_y*passenger_y, taxi_x*destination_x, taxi_y*destination_y, passenger_x*destination_x, passenger_y*destination_y)
-        return ((taxi_x-passenger_x+0.5), (taxi_y-passenger_y+0.5), (passenger_x-destination_x+0.5), (passenger_y-destination_y+0.5), 
+        return ((taxi_x-passenger_x+0.5), (taxi_y-passenger_y+0.5), (passenger_x-destination_x+0.5), (passenger_y-destination_y+0.5),
                 passenger_in_car*(taxi_x-passenger_x+0.5), passenger_in_car*(taxi_y-passenger_y+0.5), passenger_in_car*(passenger_x-destination_x+0.5), passenger_in_car*(passenger_y-destination_y+0.5))
 
     def agents_table_control_1(self):
@@ -542,11 +567,20 @@ class Taxi(Game):
                     key = '{}/{}/{}'.format(q_func, learn_method, policy)
                     self.agents[key] = Agent(self.env.observation_space.n, self.env.action_space.n, policy, learn_method, q_func, self.feature)
 
+    def agents_policy_gradient(self):
+        self.agents = {}
+        for q_func in ['Table']:
+            for policy in ['TablePolicy']:
+                for learn_method in ['QLearning']:
+                    if learn_method == 'MC': continue
+                    key = '{}/{}/{}'.format(q_func, learn_method, policy)
+                    self.agents[key] = Agent(self.env.observation_space.n, self.env.action_space.n, policy, learn_method, q_func, self.feature)
+
     def agents_prediction_1(self):
         self.agents = {}
-        for q_func in ['Linear']:
-            for policy in ['EpsilonGreedy']:
-                for learn_method in ['Sarsa']:
+        for q_func in ['Table']:
+            for policy in ['TablePolicy']: #['EpsilonGreedy']:
+                for learn_method in ['QLearning']:
                     key = '{}/{}/{}'.format(q_func, learn_method, policy)
                     self.agents[key] = Agent(self.env.observation_space.n, self.env.action_space.n, policy, learn_method, q_func, self.feature)
 
@@ -564,8 +598,9 @@ class Taxi(Game):
                 rewards_history[key], _, num_steps_history[key] = self.run_episodes(agent, episodes)
                 #q_result[idx] = copy.deepcopy(agent.q_table.buffer)
                 q_result[idx] = agent.q_table.result()
+                #q_result[idx] = agent.policy_table.result()
         #for action in range(self.env.action_space.n):
-        for action in [5]:
+        for action in [0]:
             fig = plt.figure()
             ax = fig.add_subplot(1,1,1)
             lines = None
@@ -600,8 +635,8 @@ class Taxi(Game):
 
 if __name__ == '__main__':
     game = Taxi()
-    game.run(episodes = 200000)
-    #game.run(episodes = 10000)
+    #game.run(episodes = 200000)
+    game.run(episodes = 5000)
 
     ## The output is:
 
